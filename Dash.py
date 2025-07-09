@@ -43,7 +43,7 @@ PASSWORDS = {
     "clave_nathalia":    "1633 - Nathalia Ospina",
     "clave_maira":       "9444 - Maira Alejandra Paez",
     "clave_jimmy":       "14856 - Jimmy Cortes",
-    "clave_elvis":       "11591 - Elvis",
+    "clave_elvis":       "11591 - Paula Herrera",
     "clave_maria":       "1444 - Maria Moises",
 }
 
@@ -61,9 +61,35 @@ if password not in PASSWORDS:
 sheet_name = PASSWORDS[password]
 df = load_data(sheet_name)
 
+
+st.header(f"📋 Conciliaciones: {sheet_name}")
+
 # 6) Mostrar fecha de última actualización
 ultima = df['Fecha de Carga'].max()
 st.markdown(f"## Última actualización: **{ultima.strftime('%Y-%m-%d')}**")
+
+
+st.header("💰 Saldo al cierre de la última actualización")
+
+df_tot_ultima = df[(df["Tipo"]=="Total") & (df["Fecha de Carga"]==ultima)]
+if not df_tot_ultima.empty:
+    monto_tot = df_tot_ultima["Monto"].iloc[0]
+    color = "green" if monto_tot >= 0 else "red"
+    # creamos tres columnas y metemos el número en la del medio
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown(
+            f"""
+            <div style="text-align:center; font-size:3rem; font-weight:bold; color:{color};">
+              1️⃣ ${monto_tot:,.0f}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+else:
+    st.info("⚠️ No hay registro 'Total' para la última fecha de carga.")
+
+
 
 # 7) Filtro por Fecha de Carga
 min_fecha = df['Fecha de Carga'].min().date()
@@ -77,52 +103,79 @@ df = df[df['Fecha de Carga'] >= start_date]
 
 # 8) Dashboard
 
-st.header(f"📋 Conciliaciones: {sheet_name}")
+# 8.1️⃣ Ingresos (tabla)
+st.markdown("<h3 style='text-align:center;'>2️⃣ Ingresos</h3>", unsafe_allow_html=True)
+df_in = df[df['Tipo']=='Ingreso'][['Fecha','Monto']]
+if df_in.empty:
+    st.info("Aún no hay ingresos para mostrar.")
+else:
+    df_in = df_in.copy()
+    df_in['Monto'] = df_in['Monto'].map(lambda x: f"${x:,.0f}")
+    st.dataframe(df_in, use_container_width=True)
 
-# 1️⃣ Evolución del saldo reportado
-st.header("1️⃣ Evolución del saldo reportado")
+# 8.2️⃣ Compras realizadas (Egresos) (tabla)
+st.markdown("<h3 style='text-align:center;'>3️⃣ Compras realizadas (Egresos)</h3>", unsafe_allow_html=True)
+df_eg = df[df['Tipo']=='Egreso'][['Fecha','Orden','Monto','Nombre del producto']]
+if df_eg.empty:
+    st.info("Aún no hay compras registradas.")
+else:
+    df_eg = df_eg.copy()
+    df_eg['Monto'] = df_eg['Monto'].map(lambda x: f"${x:,.0f}")
+    st.dataframe(df_eg, use_container_width=True)
+
+# ——————————————————————————————
+# 9) Todas las gráficas al final con numeración corregida
+# ——————————————————————————————
+
+# 9.1️⃣ Evolución del saldo reportado (#4)
+st.header("4️⃣ Evolución del saldo reportado")
 try:
     df_tot = df[df['Tipo']=='Total']
     if df_tot.empty:
         st.info("Aún no hay movimientos totales para mostrar.")
     else:
         fig, ax = plt.subplots(figsize=(8,4))
-        ax.plot(df_tot['Fecha de Carga'], df_tot['Monto'], marker='o')
+
+        # 1) línea gris de fondo
+        ax.plot(df_tot['Fecha de Carga'], df_tot['Monto'],
+                linestyle='-', color='lightgrey', linewidth=1)
+
+        # 2) marcadores individuales coloreados
+        for _, row in df_tot.iterrows():
+            pt_color = 'green' if row['Monto'] >= 0 else 'red'
+            ax.scatter(row['Fecha de Carga'], row['Monto'],
+                       color=pt_color, s=50, zorder=3)
+
         ax.set_title("Conciliación por día")
         ax.set_xlabel("Fecha de Carga")
         ax.set_ylabel("Saldo")
         ax.yaxis.set_major_formatter(mtick.StrMethodFormatter('${x:,.0f}'))
-        m_max, m_min = df_tot['Monto'].max(), df_tot['Monto'].min()
-        rango = m_max - m_min if m_max != m_min else m_max
+
+        # 3) anotaciones desplazadas
         for _, row in df_tot.iterrows():
-            delta = max(rango * 0.03, m_max * 0.005)
-            color = 'green' if row['Monto'] >= 0 else 'red'
-            ax.text(
-                row['Fecha de Carga'], row['Monto'] + delta,
-                f"{row['Fecha de Carga'].date()}\n${row['Monto']:,.0f}",
-                fontsize=8, ha='center', color=color
+            ann_color = 'green' if row['Monto'] >= 0 else 'red'
+            label = f"{row['Fecha de Carga'].date()}\n${row['Monto']:,.0f}"
+            offset = 30 if row['Monto'] >= 0 else -30
+            ax.annotate(
+                label,
+                xy=(row['Fecha de Carga'], row['Monto']),
+                xytext=(0, offset),
+                textcoords="offset points",
+                fontsize=8,
+                ha='center',
+                color=ann_color
             )
+
+        # 4) Centrar el gráfico en Streamlit
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             st.pyplot(fig)
+
 except Exception as e:
     st.error(f"⚠️ Error sección Evolución del saldo: {e}")
 
-# 2️⃣ Compras realizadas (Egresos)
-st.header("2️⃣ Compras realizadas (Egresos)")
-try:
-    df_eg = df[df['Tipo']=='Egreso'][['Fecha','Orden','Monto','Estado de Orden','Nombre del producto']]
-    if df_eg.empty:
-        st.info("Aún no hay compras registradas.")
-    else:
-        df_eg = df_eg.copy()
-        df_eg['Monto'] = df_eg['Monto'].map(lambda x: f"${x:,.0f}")
-        st.dataframe(df_eg, use_container_width=True)
-except Exception as e:
-    st.error(f"⚠️ Error sección Compras realizadas: {e}")
-
-# 3️⃣ Cantidad de compras (últimos 7 días)
-st.header("3️⃣ Cantidad de compras (últimos 7 días)")
+# 9.2️⃣ Cantidad de compras (últimos 7 días) (#5)
+st.header("5️⃣ Cantidad de compras (últimos 7 días)")
 try:
     df_eg2 = df[df['Tipo']=='Egreso'].copy()
     if df_eg2.empty:
@@ -139,7 +192,7 @@ try:
             ax2.plot(conteo.index, conteo.values, marker='o', color='green')
             ax2.set_title(f"Cantidad de compras: {min_f.date()} al {max_f.date()}")
             ax2.set_xlabel("Fecha")
-            ax2.set_ylabel("Número de Egresos")
+            ax2.set_ylabel("Cantidad de compras")
             ax2.set_ylim(0, conteo.max() + 5)
             for fecha, val in conteo.items():
                 ax2.text(fecha, val + 0.5, str(val), fontsize=8, ha='center', color='green')
@@ -148,8 +201,8 @@ try:
 except Exception as e:
     st.error(f"⚠️ Error sección Cantidad de compras: {e}")
 
-# 4️⃣ Valor total de compras (últimos 7 días)
-st.header("4️⃣ Valor total de compras (últimos 7 días)")
+# 9.3️⃣ Valor total de compras (últimos 7 días) (#6)
+st.header("6️⃣ Valor total de compras (últimos 7 días)")
 try:
     if df_eg2.empty:
         st.info("Sin datos de egresos para valores totales.")
@@ -162,7 +215,7 @@ try:
             ax3.plot(suma.index, suma.values, marker='o', color='green')
             ax3.set_title(f"Valor de compras: {min_f.date()} al {max_f.date()}")
             ax3.set_xlabel("Fecha")
-            ax3.set_ylabel("Monto de Egresos")
+            ax3.set_ylabel("Monto acumulado")
             ax3.yaxis.set_major_formatter(mtick.StrMethodFormatter('${x:,.0f}'))
             ax3.set_ylim(0, suma.max() * 1.25)
             rango_s = suma.max() - suma.min() if suma.max() != suma.min() else suma.max()
@@ -174,21 +227,8 @@ try:
 except Exception as e:
     st.error(f"⚠️ Error sección Valor total de compras: {e}")
 
-# 5️⃣ Ingresos
-st.header("5️⃣ Ingresos")
-try:
-    df_in = df[df['Tipo']=='Ingreso'][['Fecha','Monto']]
-    if df_in.empty:
-        st.info("Aún no hay ingresos para mostrar.")
-    else:
-        df_in = df_in.copy()
-        df_in['Monto'] = df_in['Monto'].map(lambda x: f"${x:,.0f}")
-        st.dataframe(df_in, use_container_width=True)
-except Exception as e:
-    st.error(f"⚠️ Error sección Ingresos: {e}")
-
-# 6️⃣ Ingresos últimos 7 días
-st.header("6️⃣ Ingresos últimos 7 días")
+# 9.4️⃣ Ingresos últimos 7 días (#7)
+st.header("7️⃣ Ingresos últimos 7 días")
 try:
     df_in2 = df[df['Tipo']=='Ingreso'].copy()
     if df_in2.empty:
