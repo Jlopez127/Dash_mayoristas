@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 import io
 import dropbox
+import numpy as np
 
 # 1) Configuración de la página
 st.set_page_config(page_title="Dashboard Mayoristas", layout="wide")
@@ -32,7 +33,7 @@ def load_data(sheet_name: str) -> pd.DataFrame:
     """
     _, res = dbx.files_download(cfg_dbx["remote_path"])
     df = pd.read_excel(io.BytesIO(res.content), sheet_name=sheet_name)
-    df = df.drop(columns=['TRM', 'Motivo'], errors='ignore')
+    df = df.drop(columns=['TRM'], errors='ignore')
     df['Fecha de Carga'] = pd.to_datetime(df['Fecha de Carga'])
     df['Fecha']         = pd.to_datetime(df['Fecha'], errors='coerce')
     df['Monto']         = pd.to_numeric(df['Monto'], errors='coerce')
@@ -105,7 +106,10 @@ df = df[df['Fecha de Carga'] >= start_date]
 
 # 8.1️⃣ Ingresos (tabla)
 st.markdown("<h3 style='text-align:center;'>2️⃣ Ingresos</h3>", unsafe_allow_html=True)
-df_in = df[df['Tipo']=='Ingreso'][['Fecha','Monto']]
+df_in = df[df['Tipo']=='Ingreso'][['Fecha','Monto',"Motivo","Nombre del producto"]]
+df_in['Motivo'] = np.where(df_in['Motivo'] != 'Ingreso_extra',
+                           'Consignacion cuenta propia',
+                           df_in['Motivo'])
 if df_in.empty:
     st.info("Aún no hay ingresos para mostrar.")
 else:
