@@ -46,6 +46,7 @@ PASSWORDS = {
     "clave_jimmy":       "14856 - Jimmy Cortes",
     "clave_elvis":       "11591 - Paula Herrera",
     "clave_maria":       "1444 - Maria Moises",
+    "clave_julian":       "13608 - julian sanchez"
 }
 
 # 4) Pedir clave en el sidebar
@@ -106,24 +107,34 @@ df = df[df['Fecha de Carga'] >= start_date]
 
 # 8.1️⃣ Ingresos (tabla)
 st.markdown("<h3 style='text-align:center;'>2️⃣ Ingresos</h3>", unsafe_allow_html=True)
-df_in = df[df['Tipo']=='Ingreso'][['Fecha','Monto',"Motivo","Nombre del producto"]]
-df_in['Motivo'] = np.where(df_in['Motivo'] != 'Ingreso_extra',
-                           'Consignacion cuenta propia',
-                           df_in['Motivo'])
+df_in = df.loc[df['Tipo'] == 'Ingreso', ['Fecha','Monto','Motivo','Nombre del producto']].copy()
 if df_in.empty:
     st.info("Aún no hay ingresos para mostrar.")
 else:
-    df_in = df_in.copy()
+    # Motivo y ordenamiento por fecha (desc)
+    df_in['Motivo'] = np.where(df_in['Motivo'] != 'Ingreso_extra',
+                               'Consignacion cuenta propia',
+                               df_in['Motivo'])
+    df_in['Fecha'] = pd.to_datetime(df_in['Fecha'], errors='coerce')
+    df_in = df_in.sort_values('Fecha', ascending=False, na_position='last')
+
+    # Formatos de salida
+    df_in['Fecha'] = df_in['Fecha'].dt.strftime('%Y-%m-%d')
     df_in['Monto'] = df_in['Monto'].map(lambda x: f"${x:,.0f}")
     st.dataframe(df_in, use_container_width=True)
 
 # 8.2️⃣ Compras realizadas (Egresos) (tabla)
 st.markdown("<h3 style='text-align:center;'>3️⃣ Compras realizadas (Egresos)</h3>", unsafe_allow_html=True)
-df_eg = df[df['Tipo']=='Egreso'][['Fecha','Orden','Monto','Nombre del producto']]
+df_eg = df.loc[df['Tipo'] == 'Egreso', ['Fecha','Orden','Monto','Nombre del producto']].copy()
 if df_eg.empty:
     st.info("Aún no hay compras registradas.")
 else:
-    df_eg = df_eg.copy()
+    # Ordenamiento por fecha (desc)
+    df_eg['Fecha'] = pd.to_datetime(df_eg['Fecha'], errors='coerce')
+    df_eg = df_eg.sort_values('Fecha', ascending=False, na_position='last')
+
+    # Formatos de salida
+    df_eg['Fecha'] = df_eg['Fecha'].dt.strftime('%Y-%m-%d')
     df_eg['Monto'] = df_eg['Monto'].map(lambda x: f"${x:,.0f}")
     st.dataframe(df_eg, use_container_width=True)
 
@@ -138,23 +149,41 @@ try:
     if df_tot.empty:
         st.info("Aún no hay movimientos totales para mostrar.")
     else:
+        df_tot = df_tot.copy()
+        # asegurar tipos
+        df_tot['Fecha de Carga'] = pd.to_datetime(df_tot['Fecha de Carga'], errors='coerce')
+        df_tot['Monto'] = pd.to_numeric(df_tot['Monto'], errors='coerce')
+    
+        # tomar las 7 fechas de carga más recientes (distintas)
+        fechas_recientes = (
+            df_tot['Fecha de Carga']
+            .dt.normalize()            # sólo la fecha (sin hora)
+            .dropna()
+            .drop_duplicates()
+            .sort_values(ascending=False)
+            .head(7)
+        )
+        # filtrar al conjunto de esas 7 fechas
+        df_tot = df_tot[df_tot['Fecha de Carga'].dt.normalize().isin(set(fechas_recientes))]
+        # ordenar por fecha para que la línea salga prolija
+        df_tot = df_tot.sort_values('Fecha de Carga')
+    
         fig, ax = plt.subplots(figsize=(8,4))
-
+    
         # 1) línea gris de fondo
         ax.plot(df_tot['Fecha de Carga'], df_tot['Monto'],
                 linestyle='-', color='lightgrey', linewidth=1)
-
+    
         # 2) marcadores individuales coloreados
         for _, row in df_tot.iterrows():
             pt_color = 'green' if row['Monto'] >= 0 else 'red'
-            ax.scatter(row['Fecha de Carga'], row['Monto'],
-                       color=pt_color, s=50, zorder=3)
-
+            ax.scatter(row['Fecha de Carga'], row['Monto'], color=pt_color, s=50, zorder=3)
+    
         ax.set_title("Conciliación por día")
         ax.set_xlabel("Fecha de Carga")
         ax.set_ylabel("Saldo")
         ax.yaxis.set_major_formatter(mtick.StrMethodFormatter('${x:,.0f}'))
-
+    
         # 3) anotaciones desplazadas
         for _, row in df_tot.iterrows():
             ann_color = 'green' if row['Monto'] >= 0 else 'red'
@@ -169,8 +198,7 @@ try:
                 ha='center',
                 color=ann_color
             )
-
-        # 4) Centrar el gráfico en Streamlit
+    
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             st.pyplot(fig)
