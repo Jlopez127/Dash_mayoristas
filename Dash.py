@@ -73,11 +73,24 @@ st.markdown(f"## Última actualización: **{ultima.strftime('%Y-%m-%d')}**")
 
 st.header("💰 Saldo al cierre de la última actualización")
 
-df_tot_ultima = df[(df["Tipo"]=="Total") & (df["Fecha de Carga"]==ultima)]
+# Filtra los "Total" de la última fecha de carga
+df_tot_ultima = df[
+    (df["Tipo"].astype(str).str.strip().str.lower() == "total") &
+    (df["Fecha de Carga"] == ultima)
+].copy()
+
 if not df_tot_ultima.empty:
-    monto_tot = df_tot_ultima["Monto"].iloc[0]
+    # Asegura numérico y descarta nulos
+    df_tot_ultima["Monto"] = pd.to_numeric(df_tot_ultima["Monto"], errors="coerce")
+    df_tot_ultima = df_tot_ultima.dropna(subset=["Monto"])
+
+    # Toma el MÁS BAJO; si hay empate, el ÚLTIMO registro
+    min_val = df_tot_ultima["Monto"].min()
+    fila_elegida = df_tot_ultima.tail(1)
+
+    monto_tot = float(fila_elegida["Monto"].iloc[0])
     color = "green" if monto_tot >= 0 else "red"
-    # creamos tres columnas y metemos el número en la del medio
+
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         st.markdown(
