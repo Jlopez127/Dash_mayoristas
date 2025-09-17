@@ -51,6 +51,15 @@ PASSWORDS = {
 
 # 4) Pedir clave en el sidebar
 st.sidebar.title("🔒 Acceso Mayorista")
+
+# 🔄 Botón de refresco manual (opción A)
+if st.sidebar.button("🔄 Refrescar datos"):
+    # Limpia la caché de la función cacheada
+    load_data.clear()
+    # (Opcional) limpiar toda la caché de datos:
+    # st.cache_data.clear()
+    st.rerun()
+
 password = st.sidebar.text_input("Introduce tu clave", type="password")
 if not password:
     st.sidebar.warning("Debes introducir tu clave para continuar")
@@ -119,37 +128,156 @@ df = df[df['Fecha de Carga'] >= start_date]
 # 8) Dashboard
 
 # 8.1️⃣ Ingresos (tabla)
+# 8.1️⃣ Ingresos (tabla)
 st.markdown("<h3 style='text-align:center;'>2️⃣ Ingresos</h3>", unsafe_allow_html=True)
-df_in = df.loc[df['Tipo'] == 'Ingreso', ['Fecha','Monto','Motivo','Nombre del producto']].copy()
+df_in = df.loc[df['Tipo'] == 'Ingreso', ['Fecha','Monto','Motivo','Orden','Nombre del producto']].copy()
+
 if df_in.empty:
     st.info("Aún no hay ingresos para mostrar.")
 else:
-    # Motivo y ordenamiento por fecha (desc)
-    df_in['Motivo'] = np.where(df_in['Motivo'] != 'Ingreso_extra',
-                               'Consignacion cuenta propia',
-                               df_in['Motivo'])
+    # --- Reglas de Motivo ---
+    np_nombre = df_in['Nombre del producto'].astype(str).str.strip().str.upper()
+    np_motivo = (
+        df_in['Motivo']
+        .astype(str).fillna('')
+        .str.strip()
+        .str.replace(r'\s+', ' ', regex=True)
+        .str.replace('-', '_')
+        .str.replace(' ', '_')
+        .str.upper()
+    )
+    is_devolucion = np_nombre.isin(['TOTAL', 'PARCIAL'])
+    is_ingreso_extra = np_motivo.isin(['INGRESO_EXTRA', 'INGRESOS_EXTRA'])
+
+    # 1) Devolución: si Nombre del producto es Total o Parcial
+    df_in.loc[is_devolucion, 'Motivo'] = 'Devolucion'
+    # 2) Ingreso_extra: respeta si viene marcado como ingreso(s) extra
+    df_in.loc[~is_devolucion & is_ingreso_extra, 'Motivo'] = 'Ingreso_extra'
+    # 3) Resto de casos (incluye vacíos): Consignacion cuenta propia
+    df_in.loc[~is_devolucion & ~is_ingreso_extra, 'Motivo'] = 'Consignacion cuenta propia'
+
+    # Tipos y limpieza de montos/fechas
     df_in['Fecha'] = pd.to_datetime(df_in['Fecha'], errors='coerce')
+    df_in['Monto'] = pd.to_numeric(df_in['Monto'], errors='coerce')
+    df_in = df_in[df_in['Monto'].notna() & df_in['Monto'].ne(0)]  # eliminar montos = 0
+
+    # Vaciar 'Orden' cuando Motivo sea Ingreso_extra o Consignacion cuenta propia
+    motivo_norm = (
+        df_in['Motivo'].astype(str).fillna('')
+        .str.strip()
+        .str.replace(r'\s+', ' ', regex=True)
+        .str.replace('-', '_')
+        .str.replace(' ', '_')
+        .str.upper()
+    )
+    mask_vaciar_orden = motivo_norm.isin(['INGRESO_EXTRA', 'CONSIGNACION_CUENTA_PROPIA'])
+    df_in.loc[mask_vaciar_orden, 'Orden'] = ''   # o ' ' si prefieres un espacio
+
+    # Ordenar para la vista
     df_in = df_in.sort_values('Fecha', ascending=False, na_position='last')
 
-    # Formatos de salida
+    # === Preparar DataFrame para exportación (sin formatos de pantalla) ===
+    df_export = df_in.copy()
+    df_export['Fecha'] = df_export['Fecha'].dt.date
+
+    # === Mostrar tabla formateada en UI ===
     df_in['Fecha'] = df_in['Fecha'].dt.strftime('%Y-%m-%d')
     df_in['Monto'] = df_in['Monto'].map(lambda x: f"${x:,.0f}")
     st.dataframe(df_in, use_container_width=True)
 
+    # === Botón de descarga (compacto y centrado) ===
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df_export.to_excel(writer, index=False, sheet_name="Ingresos")
+    buf.seek(0)
+    
+    c1, c2, c3 = st.columns([4, 2, 4])  # columna central más angosta
+    with c2:
+        st.download_button(
+            label="📥 Descargar Ingresos",
+            data=buf.getvalue(),
+            file_name=f"Ingresos_{sheet_name.split(' - ')[0]}_{ultima.strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True  # llena SOLO la columna angosta
+        )
+        
+    
+    
+
 # 8.2️⃣ Compras realizadas (Egresos) (tabla)
+# 8.2️⃣ Compras realizadas (Egresos)
 st.markdown("<h3 style='text-align:center;'>3️⃣ Compras realizadas (Egresos)</h3>", unsafe_allow_html=True)
 df_eg = df.loc[df['Tipo'] == 'Egreso', ['Fecha','Orden','Monto','Nombre del producto']].copy()
+
 if df_eg.empty:
     st.info("Aún no hay compras registradas.")
 else:
-    # Ordenamiento por fecha (desc)
+    # Tipos y ordenamiento
     df_eg['Fecha'] = pd.to_datetime(df_eg['Fecha'], errors='coerce')
+    df_eg['Monto'] = pd.to_numeric(df_eg['Monto'], errors='coerce')
     df_eg = df_eg.sort_values('Fecha', ascending=False, na_position='last')
 
-    # Formatos de salida
+    # === Preparar exportación (sin formatos de pantalla) ===
+    df_eg_export = df_eg.copy()
+    df_eg_export['Fecha'] = df_eg_export['Fecha'].dt.date  # fecha limpia para Excel
+
+    # === Mostrar tabla formateada en UI ===
     df_eg['Fecha'] = df_eg['Fecha'].dt.strftime('%Y-%m-%d')
     df_eg['Monto'] = df_eg['Monto'].map(lambda x: f"${x:,.0f}")
     st.dataframe(df_eg, use_container_width=True)
+
+    # === Botón de descarga compacto y centrado ===
+    buf_eg = io.BytesIO()
+    with pd.ExcelWriter(buf_eg, engine="openpyxl") as writer:
+        df_eg_export.to_excel(writer, index=False, sheet_name="Egresos")
+    buf_eg.seek(0)
+
+    c1, c2, c3 = st.columns([4, 2, 4])
+    with c2:
+        st.download_button(
+            label="📥 Descargar Egresos",
+            data=buf_eg.getvalue(),
+            file_name=f"Egresos_{sheet_name.split(' - ')[0]}_{ultima.strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True  # ocupa solo la columna central (estrecha)
+        )
+
+
+st.markdown("<h3 style='text-align:center;'>🧾 Consolidado (Ingresos + Egresos)</h3>", unsafe_allow_html=True)
+
+# Copias para consolidado (pueden venir ya formateadas para UI)
+df_in_c = df_in.copy()
+df_eg_c = df_eg.copy()
+
+df_in_c['Tipo'] = 'Ingreso'
+
+df_eg_c['Tipo'] = 'Egreso'
+
+df_consol = pd.concat([df_in_c, df_eg_c], ignore_index=True)
+
+# Ordenar por Fecha (más reciente arriba)
+df_consol = df_consol.sort_values('Fecha', ascending=False, na_position='last')
+
+# Export: Fecha como date (no string), sin formatos de moneda
+df_consol_exp = df_consol.copy()
+df_consol_exp['Fecha'] = pd.to_datetime(df_consol_exp['Fecha'], errors='coerce').dt.date
+
+# Botón compacto y centrado
+buf_cons = io.BytesIO()
+with pd.ExcelWriter(buf_cons, engine="openpyxl") as writer:
+    df_consol_exp.to_excel(writer, index=False, sheet_name="Consolidado")
+buf_cons.seek(0)
+
+c1, c2, c3 = st.columns([4, 2, 4])
+with c2:
+    st.download_button(
+        label="📦 Descargar consolidado completo",
+        data=buf_cons.getvalue(),
+        file_name=f"Consolidado_{sheet_name.split(' - ')[0]}_{ultima.strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
+    )
+
 
 # ——————————————————————————————
 # 9) Todas las gráficas al final con numeración corregida
