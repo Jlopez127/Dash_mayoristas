@@ -33,10 +33,14 @@ def load_data(sheet_name: str) -> pd.DataFrame:
     """
     _, res = dbx.files_download(cfg_dbx["remote_path"])
     df = pd.read_excel(io.BytesIO(res.content), sheet_name=sheet_name)
-    df = df.drop(columns=['TRM'], errors='ignore')
+    if sheet_name != "1444 - Maria Moises":
+        df = df.drop(columns=['TRM'], errors='ignore')
     df['Fecha de Carga'] = pd.to_datetime(df['Fecha de Carga'])
     df['Fecha']         = pd.to_datetime(df['Fecha'], errors='coerce')
     df['Monto']         = pd.to_numeric(df['Monto'], errors='coerce')
+    # 👇 Convertir TRM a numérico solo si existe (en la hoja 1444)
+    if 'TRM' in df.columns:
+        df['TRM'] = pd.to_numeric(df['TRM'], errors='coerce').add(100)
     return df
 
 # 3) Diccionario de claves por hoja
@@ -130,7 +134,13 @@ df = df[df['Fecha de Carga'] >= start_date]
 # 8.1️⃣ Ingresos (tabla)
 # 8.1️⃣ Ingresos (tabla)
 st.markdown("<h3 style='text-align:center;'>2️⃣ Ingresos</h3>", unsafe_allow_html=True)
-df_in = df.loc[df['Tipo'] == 'Ingreso', ['Fecha','Monto','Motivo','Orden','Nombre del producto']].copy()
+# 👇 Columnas base
+cols_in = ['Fecha','Monto','Motivo','Orden','Nombre del producto']
+# 👇 Agrega TRM SOLO para '1444 - Maria Moises' si está disponible
+if sheet_name == "1444 - Maria Moises" and 'TRM' in df.columns:
+    cols_in.append('TRM')
+
+df_in = df.loc[df['Tipo'] == 'Ingreso', cols_in].copy()
 
 if df_in.empty:
     st.info("Aún no hay ingresos para mostrar.")
