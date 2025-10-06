@@ -135,6 +135,7 @@ df = df[df['Fecha de Carga'] >= start_date]
 # 8.1️⃣ Ingresos (tabla)
 st.markdown("<h3 style='text-align:center;'>2️⃣ Ingresos</h3>", unsafe_allow_html=True)
 # 👇 Columnas base
+# 👇 Columnas base
 cols_in = ['Fecha','Monto','Motivo','Orden','Nombre del producto']
 # 👇 Agrega TRM SOLO para '1444 - Maria Moises' si está disponible
 if sheet_name == "1444 - Maria Moises" and 'TRM' in df.columns:
@@ -159,19 +160,21 @@ else:
     is_devolucion = np_nombre.isin(['TOTAL', 'PARCIAL'])
     is_ingreso_extra = np_motivo.isin(['INGRESO_EXTRA', 'INGRESOS_EXTRA'])
 
-    # 1) Devolución: si Nombre del producto es Total o Parcial
     df_in.loc[is_devolucion, 'Motivo'] = 'Devolucion'
-    # 2) Ingreso_extra: respeta si viene marcado como ingreso(s) extra
     df_in.loc[~is_devolucion & is_ingreso_extra, 'Motivo'] = 'Ingreso_extra'
-    # 3) Resto de casos (incluye vacíos): Consignacion cuenta propia
     df_in.loc[~is_devolucion & ~is_ingreso_extra, 'Motivo'] = 'Consignacion cuenta propia'
 
-    # Tipos y limpieza de montos/fechas
+    # Tipos y limpieza
     df_in['Fecha'] = pd.to_datetime(df_in['Fecha'], errors='coerce')
     df_in['Monto'] = pd.to_numeric(df_in['Monto'], errors='coerce')
-    df_in = df_in[df_in['Monto'].notna() & df_in['Monto'].ne(0)]  # eliminar montos = 0
 
-    # Vaciar 'Orden' cuando Motivo sea Ingreso_extra o Consignacion cuenta propia
+    # 👉 Solo Maria Moises: agregar columna Monto COP
+    if sheet_name == "1444 - Maria Moises" and 'TRM' in df_in.columns:
+        df_in['Monto COP'] = df_in['Monto'] * df_in['TRM']
+
+    df_in = df_in[df_in['Monto'].notna() & df_in['Monto'].ne(0)]
+
+    # Vaciar 'Orden'
     motivo_norm = (
         df_in['Motivo'].astype(str).fillna('')
         .str.strip()
@@ -181,38 +184,37 @@ else:
         .str.upper()
     )
     mask_vaciar_orden = motivo_norm.isin(['INGRESO_EXTRA', 'CONSIGNACION_CUENTA_PROPIA'])
-    df_in.loc[mask_vaciar_orden, 'Orden'] = ''   # o ' ' si prefieres un espacio
+    df_in.loc[mask_vaciar_orden, 'Orden'] = ''
 
     # Ordenar para la vista
     df_in = df_in.sort_values('Fecha', ascending=False, na_position='last')
 
-    # === Preparar DataFrame para exportación (sin formatos de pantalla) ===
+    # === Exportación ===
     df_export = df_in.copy()
-    df_export['Fecha'] = df_export['Fecha'].dt.date
+    df_export['Fecha'] = pd.to_datetime(df_export['Fecha'], errors='coerce').dt.date
 
-    # === Mostrar tabla formateada en UI ===
-    df_in['Fecha'] = df_in['Fecha'].dt.strftime('%Y-%m-%d')
-    df_in['Monto'] = df_in['Monto'].map(lambda x: f"${x:,.0f}")
+    # === Mostrar formateado ===
+    df_in['Fecha'] = pd.to_datetime(df_in['Fecha'], errors='coerce').dt.strftime('%Y-%m-%d')
+    df_in['Monto'] = pd.to_numeric(df_in['Monto'], errors='coerce').map(lambda x: f"${x:,.0f}")
+    if 'Monto COP' in df_in.columns:
+        df_in['Monto COP'] = pd.to_numeric(df_in['Monto COP'], errors='coerce').map(lambda x: f"${x:,.0f}")
     st.dataframe(df_in, use_container_width=True)
 
-    # === Botón de descarga (compacto y centrado) ===
+    # === Botón descarga ===
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         df_export.to_excel(writer, index=False, sheet_name="Ingresos")
     buf.seek(0)
-    
-    c1, c2, c3 = st.columns([4, 2, 4])  # columna central más angosta
+
+    c1, c2, c3 = st.columns([4, 2, 4])
     with c2:
         st.download_button(
             label="📥 Descargar Ingresos",
             data=buf.getvalue(),
             file_name=f"Ingresos_{sheet_name.split(' - ')[0]}_{ultima.strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True  # llena SOLO la columna angosta
+            use_container_width=True
         )
-        
-    
-    
 
 # 8.2️⃣ Compras realizadas (Egresos) (tabla)
 # 8.2️⃣ Compras realizadas (Egresos)
