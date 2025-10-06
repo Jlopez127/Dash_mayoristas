@@ -25,23 +25,32 @@ dbx = dropbox.Dropbox(
     oauth2_refresh_token=cfg_dbx["refresh_token"],
 )
 
+
 @st.cache_data
 def load_data(sheet_name: str) -> pd.DataFrame:
-    """
-    Descarga el Excel de Dropbox, carga sólo la hoja sheet_name
-    y normaliza columnas.
-    """
     _, res = dbx.files_download(cfg_dbx["remote_path"])
     df = pd.read_excel(io.BytesIO(res.content), sheet_name=sheet_name)
-    if sheet_name != "1444 - Maria Moises":
+
+    # 👇 Caso especial para la hoja COP
+    if sheet_name == "1444 - Maria Moises COP":
+        if 'Fecha de Carga' not in df.columns and 'Fecha' in df.columns:
+            df['Fecha de Carga'] = df['Fecha']  # usar Fecha como Fecha de Carga
+    
+    if sheet_name != "1444 - Maria Moises" and sheet_name != "1444 - Maria Moises COP":
         df = df.drop(columns=['TRM'], errors='ignore')
-    df['Fecha de Carga'] = pd.to_datetime(df['Fecha de Carga'])
-    df['Fecha']         = pd.to_datetime(df['Fecha'], errors='coerce')
-    df['Monto']         = pd.to_numeric(df['Monto'], errors='coerce')
-    # 👇 Convertir TRM a numérico solo si existe (en la hoja 1444)
+
+    # Normalizaciones
+    if 'Fecha de Carga' in df.columns:
+        df['Fecha de Carga'] = pd.to_datetime(df['Fecha de Carga'], errors='coerce')
+    if 'Fecha' in df.columns:
+        df['Fecha'] = pd.to_datetime(df['Fecha'], errors='coerce')
+    if 'Monto' in df.columns:
+        df['Monto'] = pd.to_numeric(df['Monto'], errors='coerce')
     if 'TRM' in df.columns:
         df['TRM'] = pd.to_numeric(df['TRM'], errors='coerce').add(100)
+
     return df
+
 
 # 3) Diccionario de claves por hoja
 PASSWORDS = {
@@ -76,7 +85,15 @@ if password not in PASSWORDS:
 sheet_name = PASSWORDS[password]
 df = load_data(sheet_name)
 
-
+# 👉 Solo si es Maria Moises: cargar la hoja en COP adicional
+df_cop = None
+if sheet_name == "1444 - Maria Moises":
+    try:
+        df_cop = load_data("1444 - Maria Moises COP")
+    except Exception as e:
+        st.error(f"⚠️ No se pudo cargar la hoja en COP: {e}")
+        
+        
 st.header(f"📋 Conciliaciones: {sheet_name}")
 
 # 6) Mostrar fecha de última actualización
@@ -289,6 +306,59 @@ with c2:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
+
+
+
+
+
+
+## EGRESOS EN COP MARIA MOPISES
+
+
+
+
+# 👉 Crear df_eg_extra_cop solo para Maria Moises
+df_eg_extra_cop = None
+if sheet_name == "1444 - Maria Moises" and df_cop is not None:
+    try:
+        # Filtrar solo las columnas necesarias
+        cols_needed = ['Fecha', 'Egreso_extra_COP', 'GMF_4x1000_COP']
+        df_eg_extra_cop = df_cop[cols_needed].copy()
+
+        # Asegurar tipos
+        df_eg_extra_cop['Fecha'] = pd.to_datetime(df_eg_extra_cop['Fecha'], errors='coerce')
+        df_eg_extra_cop = df_eg_extra_cop.dropna(subset=['Fecha'])
+
+        # Ordenar por fecha descendente
+        df_eg_extra_cop = df_eg_extra_cop.sort_values('Fecha', ascending=False)
+
+        # Mostrar en UI
+        st.markdown("<h3 style='text-align:center;'>🪙 Egresos Extra en COP</h3>", unsafe_allow_html=True)
+        df_tmp = df_eg_extra_cop.copy()
+        df_tmp['Fecha'] = df_tmp['Fecha'].dt.strftime('%Y-%m-%d')
+        df_tmp['Egreso_extra_COP'] = pd.to_numeric(df_tmp['Egreso_extra_COP'], errors='coerce').map(lambda x: f"${x:,.0f}")
+        df_tmp['GMF_4x1000_COP'] = pd.to_numeric(df_tmp['GMF_4x1000_COP'], errors='coerce').map(lambda x: f"${x:,.0f}")
+        st.dataframe(df_tmp, use_container_width=True)
+
+        # Exportar a Excel
+        buf_extra = io.BytesIO()
+        with pd.ExcelWriter(buf_extra, engine="openpyxl") as writer:
+            df_eg_extra_cop.to_excel(writer, index=False, sheet_name="EgresosExtraCOP")
+        buf_extra.seek(0)
+
+        c1, c2, c3 = st.columns([4, 2, 4])
+        with c2:
+            st.download_button(
+                label="📥 Descargar Egresos Extra COP",
+                data=buf_extra.getvalue(),
+                file_name=f"EgresosExtraCOP_{ultima.strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+    except Exception as e:
+        st.error(f"⚠️ Error procesando Egresos Extra COP: {e}")
+
+
 
 
 # ——————————————————————————————
