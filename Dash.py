@@ -59,7 +59,8 @@ PASSWORDS = {
     "clave_jimmy":       "14856 - Jimmy Cortes",
     "clave_elvis":       "11591 - Paula Herrera",
     "clave_maria":       "1444 - Maria Moises",
-    "clave_julian":       "13608 - julian sanchez"
+    "clave_julian":       "13608 - julian sanchez",
+    "clave_juan":     "9680 - Juan Felipe Laverde" 
 }
 
 # 4) Pedir clave en el sidebar
