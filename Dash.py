@@ -165,44 +165,47 @@ if df_in.empty:
     st.info("Aún no hay ingresos para mostrar.")
 else:
     # --- Reglas de Motivo ---
+# --- Reglas de Motivo + normalización de Orden ---
     np_nombre = df_in['Nombre del producto'].astype(str).str.strip().str.upper()
-    np_motivo = (
-        df_in['Motivo']
-        .astype(str).fillna('')
-        .str.strip()
+    np_motivo_raw = df_in['Motivo'].astype(str).fillna('')
+    
+    motivo_norm = (
+        np_motivo_raw.str.strip()
         .str.replace(r'\s+', ' ', regex=True)
         .str.replace('-', '_')
         .str.replace(' ', '_')
         .str.upper()
     )
+    
+    # 1) Detectar devoluciones por nombre del producto
     is_devolucion = np_nombre.isin(['TOTAL', 'PARCIAL'])
-    is_ingreso_extra = np_motivo.isin(['INGRESO_EXTRA', 'INGRESOS_EXTRA'])
-
+    
+    # 2) Detectar ingresos extra por motivo o por el contenido de 'Orden' (ej: "Extra1")
+    orden_str = df_in['Orden'].astype(str).fillna('').str.strip()
+    is_extra_por_motivo = motivo_norm.isin(['INGRESO_EXTRA', 'INGRESOS_EXTRA'])
+    is_extra_por_orden  = orden_str.str.match(r'(?i)^\s*EXTRA\d*\s*$')  # Extra, Extra1, etc.
+    is_ingreso_extra    = is_extra_por_motivo | is_extra_por_orden
+    
+    # 3) Asignar motivo final
     df_in.loc[is_devolucion, 'Motivo'] = 'Devolucion'
     df_in.loc[~is_devolucion & is_ingreso_extra, 'Motivo'] = 'Ingreso_extra'
     df_in.loc[~is_devolucion & ~is_ingreso_extra, 'Motivo'] = 'Consignacion cuenta propia'
-
+    
     # Tipos y limpieza
     df_in['Fecha'] = pd.to_datetime(df_in['Fecha'], errors='coerce')
     df_in['Monto'] = pd.to_numeric(df_in['Monto'], errors='coerce')
-
+    
     # 👉 Solo Maria Moises: agregar columna Monto COP
     if sheet_name == "1444 - Maria Moises" and 'TRM' in df_in.columns:
         df_in['Monto COP'] = df_in['Monto'] * df_in['TRM']
-
+    
     df_in = df_in[df_in['Monto'].notna() & df_in['Monto'].ne(0)]
-
-    # Vaciar 'Orden'
-    motivo_norm = (
-        df_in['Motivo'].astype(str).fillna('')
-        .str.strip()
-        .str.replace(r'\s+', ' ', regex=True)
-        .str.replace('-', '_')
-        .str.replace(' ', '_')
-        .str.upper()
-    )
-    mask_vaciar_orden = motivo_norm.isin(['INGRESO_EXTRA', 'CONSIGNACION_CUENTA_PROPIA'])
-    df_in.loc[mask_vaciar_orden, 'Orden'] = ''
+    
+    # 4) Vaciar 'Orden' SOLO si es Ingreso_extra. Para consignación normal, conservar el ID.
+    df_in['Orden'] = df_in['Orden'].astype(str).fillna('').str.strip()
+    mask_vaciar_orden_solo_extras = df_in['Motivo'].astype(str).str.upper().eq('INGRESO_EXTRA')
+    df_in.loc[mask_vaciar_orden_solo_extras, 'Orden'] = ''
+    
 
     # Ordenar para la vista
     df_in = df_in.sort_values('Fecha', ascending=False, na_position='last')
@@ -323,7 +326,7 @@ df_eg_extra_cop = None
 if sheet_name == "1444 - Maria Moises" and df_cop is not None:
     try:
         # Filtrar solo las columnas necesarias
-        cols_needed = ['Fecha', 'Egreso_extra_COP', 'GMF_4x1000_COP']
+        cols_needed = ['Fecha', 'Egreso_extra_COP', 'GMF_4x1000_COP','Descripcion']
         df_eg_extra_cop = df_cop[cols_needed].copy()
 
         # Asegurar tipos
