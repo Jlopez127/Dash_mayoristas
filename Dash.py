@@ -1368,7 +1368,7 @@ def log_invoice_error(invoice_number, error_reason: str) -> bool:
 
 
 
-
+run_facturacion_masiva
 
 import requests
 import json
@@ -1613,15 +1613,15 @@ def build_invoice_from_row(
     number: int,
     casillero_actual: str
 ) -> dict:
-    """
-    Construye el payload de factura para Agiom a partir de una fila de ingreso.
+ #   """
+  #  Construye el payload de factura para Agiom a partir de una fila de ingreso.
 
-    Lógica financiera (T = total cobrado al cliente en COP):
-        GN1   = T / 1.015                → ingreso para terceros (sin IVA)
-        SR02  = (GN1 * 0.015) / 1.19     → comisión base (sin IVA)
-        IVA   = SR02 * 0.19              → IVA de la comisión
-        GN1 + SR02 + IVA ≈ T
-    """
+   # Lógica financiera (T = total cobrado al cliente en COP):
+    #    GN1   = T / 1.015                → ingreso para terceros (sin IVA)
+     #   SR02  = (GN1 * 0.015) / 1.19     → comisión base (sin IVA)
+      #  IVA   = SR02 * 0.19              → IVA de la comisión
+       # GN1 + SR02 + IVA ≈ T
+    #"""
 
     # 1) Fecha de la factura
     fecha = datetime.now().strftime("%Y-%m-%d")
@@ -1743,16 +1743,16 @@ def run_facturacion_masiva(
     iva_19_id: int | None = None,
     source_filename: str | None = None,
 ):
-    """
-    Reemplaza al main() del repo:
-    - Usa df_ing_pend (ingresos con Id_cliente y Factura vacía, ya preparados)
-    - Usa df_clientes (todos los clientes del casillero)
-    Además:
-    - Crea cliente en Siigo si no existe.
-    - Crea factura en Siigo.
-    - Escribe el número de factura en df_ing_pend["Factura"].
-    - Actualiza el Excel original de ingresos en Dropbox usando ID_INGRESO.
-    """
+    #"""
+   # Reemplaza al main() del repo:
+    #- Usa df_ing_pend (ingresos con Id_cliente y Factura vacía, ya preparados)
+    #- Usa df_clientes (todos los clientes del casillero)
+    #Además:
+    #- Crea cliente en Siigo si no existe.
+    #- Crea factura en Siigo.
+    #- Escribe el número de factura en df_ing_pend["Factura"].
+    #- Actualiza el Excel original de ingresos en Dropbox usando ID_INGRESO.
+    #"""
     st.write("=== Iniciando proceso de facturación MASIVA en Siigo ===")
 
     # 1) Obtener token una sola vez
@@ -1977,7 +1977,7 @@ def run_facturacion_masiva(
 
 
 
-run_facturacion_masiva
+
 
 
 
