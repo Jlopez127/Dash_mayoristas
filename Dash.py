@@ -19,6 +19,9 @@ import pandas as pd
 import math
 
 
+
+
+
 # 1) Configuración de la página
 st.set_page_config(page_title="Dashboard Mayoristas", layout="wide")
 
@@ -1368,7 +1371,7 @@ def log_invoice_error(invoice_number, error_reason: str) -> bool:
 
 
 
-run_facturacion_masiva
+
 
 import requests
 import json
@@ -2014,7 +2017,7 @@ if st.button("🚀 Realizar facturación", use_container_width=True):
 
 
 
-build_invoice_from_row
+
 
 
 #####################################################################################################################
