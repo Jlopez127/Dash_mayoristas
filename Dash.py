@@ -1742,21 +1742,43 @@ def run_facturacion_masiva(
     doc_id: int,
     seller_id: int,
     payment_id: int,
-    casillero_actual: str,              # 👈 NUEVO (OBLIGATORIO)
+    casillero_actual: str,              # 👈 OBLIGATORIO
     iva_19_id: int | None = None,
-    source_filename: str | None = None,
+    source_filename: str | None = None,  # nombre del archivo de ingresos en Dropbox
 ):
-    #"""
-   # Reemplaza al main() del repo:
-    #- Usa df_ing_pend (ingresos con Id_cliente y Factura vacía, ya preparados)
-    #- Usa df_clientes (todos los clientes del casillero)
-    #Además:
-    #- Crea cliente en Siigo si no existe.
-    #- Crea factura en Siigo.
-    #- Escribe el número de factura en df_ing_pend["Factura"].
-    #- Actualiza el Excel original de ingresos en Dropbox usando ID_INGRESO.
-    #"""
+    """
+    - Usa df_ing_pend (ingresos con Id_cliente y Factura vacía, ya preparados)
+    - Usa df_clientes (todos los clientes del casillero)
+    Además:
+    - Crea cliente en Siigo si no existe.
+    - Crea factura en Siigo.
+    - Escribe el número de factura en df_ing_pend["Factura"].
+    - Actualiza el Excel original de ingresos en Dropbox usando ID_INGRESO.
+    """
     st.write("=== Iniciando proceso de facturación MASIVA en Siigo ===")
+
+    # =================================================================================
+    # ## FIX: normalizar IDs para evitar 123.0 / 1010234396.0
+    # =================================================================================
+    def _clean_id(x) -> str:
+        s = "" if x is None else str(x).strip()
+        s_low = s.lower()
+        if s_low in {"", "nan", "none", "null", "<na>"}:
+            return ""
+        # quita .0 típico cuando Excel/Pandas lo leyó como float
+        s = re.sub(r"\.0$", "", s)
+        return s
+
+    # Normalizar Id_cliente en ingresos (por si viene como float)
+    if "Id_cliente" in df_ing_pend.columns:
+        df_ing_pend["Id_cliente"] = df_ing_pend["Id_cliente"].apply(_clean_id)
+    else:
+        df_ing_pend["Id_cliente"] = ""
+
+    # Normalizar identificación en clientes
+    COL_ID = "Identificación (Obligatorio)"
+    if df_clientes is not None and not df_clientes.empty and COL_ID in df_clientes.columns:
+        df_clientes[COL_ID] = df_clientes[COL_ID].apply(_clean_id)
 
     # 1) Obtener token una sola vez
     st.write("1️⃣ Obteniendo token de autenticación...")
@@ -1767,19 +1789,20 @@ def run_facturacion_masiva(
 
     # 2) Consultar desde Siigo el ÚLTIMO número de factura
     st.write("2️⃣ Calculando máximo número de factura en Siigo (recorriendo varias páginas)...")
-    last_number = get_max_invoice_number(token, max_pages=30)  # por ejemplo 30 páginas
-    
+    last_number = get_max_invoice_number(token, max_pages=30)
     if last_number is None:
         st.error(
             "No se pudo calcular el consecutivo máximo de facturas en Siigo. "
             "Revisa logs de get_max_invoice_number."
         )
         return
-    
+
     current_number = int(last_number) + 1
+
     # 🔒 Límite legal de numeración de facturas
     FACTURA_MAX_NUMERO = 150_000
-    
+
+    # Corte temprano (antes de arrancar el loop)
     if current_number > FACTURA_MAX_NUMERO - 1:
         st.error(
             f"❌ No es posible continuar con la facturación.\n\n"
@@ -1791,11 +1814,11 @@ def run_facturacion_masiva(
 
     st.write(f"➡️ Primer número de factura a usar (max + 1): {current_number}")
 
-
-    # Índice por identificación para acceso rápido
+    # Índice por identificación para acceso rápido (YA normalizado)
     cli_idx = {
-        str(row["Identificación (Obligatorio)"]).strip(): row
+        _clean_id(row.get(COL_ID, "")): row
         for _, row in df_clientes.iterrows()
+        if _clean_id(row.get(COL_ID, "")) != ""
     }
 
     total = len(df_ing_pend)
@@ -1807,7 +1830,7 @@ def run_facturacion_masiva(
         df_ing_pend["Factura"] = pd.NA
 
     for i, (idx, ing_row) in enumerate(df_ing_pend.iterrows(), start=1):
-        ident = str(ing_row.get("Id_cliente", "")).strip()
+        ident = _clean_id(ing_row.get("Id_cliente", ""))
         id_ingreso = ing_row.get("ID_INGRESO", f"fila_{i}")
 
         st.write(
@@ -1844,17 +1867,17 @@ def run_facturacion_masiva(
 
         # 4) Intentar crear la factura con mecanismo de reintento
         intentos = 0
-        max_intentos = 20  # por si acaso, para no quedar en bucle infinito
+        max_intentos = 20
 
         while intentos < max_intentos:
             intentos += 1
             numero_en_uso = current_number
+
             # 🔒 Corte duro por límite legal de facturación
             if numero_en_uso > FACTURA_MAX_NUMERO - 1:
                 msg = f"Se alcanzó el límite legal de facturación ({FACTURA_MAX_NUMERO - 1})."
                 st.error("❌ " + msg)
                 return
-
 
             st.write(f"   ➜ Intento #{intentos} con número de factura {numero_en_uso} ...")
 
@@ -1864,32 +1887,27 @@ def run_facturacion_masiva(
                     doc_id=doc_id,
                     seller_id=seller_id,
                     payment_id=payment_id,
-                    iva_19_id=iva_19_id,
+                    iva_19_id=iva_19_id,                  # <-- si le pasas 8368, queda fijo
                     number=numero_en_uso,
                     casillero_actual=str(casillero_actual),
                 )
-
             except Exception as e:
                 err_msg = f"Error armando la factura para ingreso {id_ingreso}: {e}"
                 st.error(err_msg)
                 log_invoice_error(id_ingreso, err_msg)
                 err_count += 1
-                break  # salimos del while para pasar al siguiente ingreso
+                break
 
             ok, err_msg = create_invoice_siigo(token, invoice_data)
 
             if ok:
-                # ÉXITO: guardamos el número y avanzamos al siguiente ingreso
                 num_factura = str(numero_en_uso)
                 df_ing_pend.loc[idx, "Factura"] = num_factura
-                st.success(
-                    f"✅ Factura {num_factura} creada correctamente para ingreso {id_ingreso}"
-                )
+                st.success(f"✅ Factura {num_factura} creada correctamente para ingreso {id_ingreso}")
                 ok_count += 1
-                current_number = numero_en_uso + 1  # siguiente número base para la próxima factura
-                break  # salimos del while intentos
+                current_number = numero_en_uso + 1
+                break
 
-            # Si NO ok:
             texto_err = str(err_msg or "")
             if "already_exists" in texto_err or "number already exists" in texto_err:
                 st.warning(
@@ -1897,16 +1915,14 @@ def run_facturacion_masiva(
                     "Probando con el siguiente consecutivo..."
                 )
                 current_number = numero_en_uso + 1
-                continue  # reintenta con el nuevo current_number
+                continue
 
-            # Otro tipo de error → no tiene sentido seguir probando con +1
             err_count += 1
             log_invoice_error(id_ingreso, err_msg or "Error desconocido")
             st.error(f"❌ Error creando factura para ingreso {id_ingreso}: {err_msg}")
-            break  # salimos del while para pasar al siguiente ingreso
+            break
 
         else:
-            # Si se acabaron los intentos (while terminó por condición, no por break)
             msg = (
                 f"No se pudo crear factura para ingreso {id_ingreso} "
                 f"después de {max_intentos} intentos de consecutivo."
@@ -1938,7 +1954,6 @@ def run_facturacion_masiva(
             st.error(f"⚠️ No se pudo leer el archivo de ingresos en Dropbox: {fullpath}")
             return
 
-        # Asegurar columnas clave
         if "ID_INGRESO" not in df_file.columns:
             df_file["ID_INGRESO"] = pd.NA
         if "Factura" not in df_file.columns:
@@ -1953,28 +1968,20 @@ def run_facturacion_masiva(
             if pd.isna(factura) or str(factura).strip() == "":
                 continue
 
-            mask = (
-                df_file["ID_INGRESO"]
-                .astype(str).str.strip()
-                .eq(str(id_ing).strip())
-            )
+            mask = df_file["ID_INGRESO"].astype(str).str.strip().eq(str(id_ing).strip())
             df_file.loc[mask, "Factura"] = factura
 
-        # Guardar archivo actualizado en Dropbox
         buf_up = io.BytesIO()
         with pd.ExcelWriter(buf_up, engine="openpyxl") as w:
             df_file.to_excel(w, index=False, sheet_name="Ingresos")
         buf_up.seek(0)
-        dbx.files_upload(
-            buf_up.read(),
-            fullpath,
-            mode=dropbox.files.WriteMode.overwrite
-        )
 
+        dbx.files_upload(buf_up.read(), fullpath, mode=dropbox.files.WriteMode.overwrite)
         st.write(f"🔄 Excel de ingresos actualizado con las facturas en: {source_filename}")
 
     except Exception as e:
         st.error(f"⚠️ No se pudo actualizar el Excel de ingresos con las facturas: {e}")
+
 
 
 
