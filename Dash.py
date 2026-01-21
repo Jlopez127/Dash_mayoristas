@@ -1104,25 +1104,55 @@ from datetime import datetime
 
 # ======================= FUNCIONES SIIGO UNIFICADAS =======================
 
+
+import re
+
+def _clean_text(x) -> str:
+    if x is None:
+        return ""
+    s = str(x).strip()
+    if s.lower() in {"", "nan", "none", "null", "<na>"}:
+        return ""
+    # quita ".0" típico
+    s = re.sub(r"\.0$", "", s)
+    return s.strip()
+
+def _clean_phone(x) -> str:
+    s = _clean_text(x)
+    # deja solo dígitos
+    s = re.sub(r"[^\d]", "", s)
+    return s
+
+def _clean_code_numeric(x) -> str:
+    """
+    Limpia códigos que suelen venir como float (ej 5.0, 05001.0).
+    Retorna solo dígitos sin decimales.
+    """
+    s = _clean_text(x)
+    s = re.sub(r"[^\d]", "", s)
+    return s
+
+
+
+
+
+
+
+
+SIIGO_BASE_URL = "https://api.siigo.com"
+NOMBRE_DE_MI_APP = "AutomatizacionFacturasEncargomio"
+
+
 def obtain_token():
     """
-    Obtiene un token de acceso de la API de Siigo.
-    ⚠️ Deja username y access_key vacíos o ponlos en secrets, pero NO hardcodees el token.
+    Obtiene token de Siigo usando st.secrets["siigo"]["username"] y ["access_key"].
     """
-    API_URL = "https://api.siigo.com/auth"
-    NOMBRE_DE_MI_APP = "AutomatizacionFacturasEncargomio"
-    
-    # 👉 OPCIÓN 1: Dejar quemado (luego tú lo llenas):
-    #credentials = {
-     #   "username": "contacto@encargomio.com",
-      #  "access_key": "ZDlhZTFiZTUtY2Q3Mi00ODE0LTliZTUtMjU3ZTQ4OGY3MTJlOmN1PnhBOSg4Y04="
-    #}
+    API_URL = f"{SIIGO_BASE_URL}/auth"
 
-    # 👉 OPCIÓN 2 (recomendada): usar st.secrets (descomenta y configura en Streamlit Cloud)
     credentials = {
-         "username": st.secrets["siigo"]["username"],
-         "access_key": st.secrets["siigo"]["access_key"],
-     }
+        "username": st.secrets["siigo"]["username"],
+        "access_key": st.secrets["siigo"]["access_key"],
+    }
 
     headers = {
         "Content-Type": "application/json",
@@ -1130,54 +1160,28 @@ def obtain_token():
     }
 
     try:
-        response = requests.post(API_URL, data=json.dumps(credentials), headers=headers)
-        
+        resp = requests.post(API_URL, json=credentials, headers=headers, timeout=30)
         try:
-            response_data = response.json()
+            data = resp.json()
         except json.JSONDecodeError:
-            print(f"ERROR: La respuesta de autenticación no es un JSON válido. Código: {response.status_code}")
-            print(f"Contenido de la respuesta: {response.text[:200]}")
             return None
-        
-        if response.status_code == 200:
-            token = response_data.get('access_token')
-            if token:
-                print("Token de acceso obtenido exitosamente.")
-                return token
-            else:
-                print("ERROR: No se encontró 'access_token' en la respuesta.")
-                print(json.dumps(response_data, indent=2, ensure_ascii=False))
-                return None
-        else:
-            print(f"ERROR al obtener el token (Código: {response.status_code}).")
-            print("Respuesta del servidor:")
-            print(json.dumps(response_data, indent=2, ensure_ascii=False))
-            return None
-            
-    except requests.exceptions.Timeout:
-        print("ERROR: Tiempo de espera agotado al conectar con la API de Siigo.")
+
+        if resp.status_code == 200 and data.get("access_token"):
+            return data["access_token"]
+
         return None
-    except requests.exceptions.ConnectionError:
-        print("ERROR: No se pudo establecer conexión con la API de Siigo.")
+
+    except requests.exceptions.RequestException:
         return None
-    except requests.exceptions.RequestException as e:
-        print(f"ERROR de conexión: {e}")
-        return None
-    except Exception as e:
-        print(f"ERROR inesperado al obtener token: {e}")
-        return None    
+
+
+
+
+
 
 
 def verify_customer(access_token: str, customer_identification: str) -> bool:
-    """
-    Verifica si existe un cliente en Siigo por su identificación.
-    """
-    API_CUSTOMERS_URL = "https://api.siigo.com/v1/customers?identification=" + customer_identification
-
-    if not access_token or access_token == "TU_ACCESS_TOKEN":
-        print("¡ERROR! Token de acceso inválido.")
-        return False
-
+    API_CUSTOMERS_URL = f"https://api.siigo.com/v1/customers?identification={customer_identification}"
     NOMBRE_DE_MI_APP = "AutomatizacionFacturasEncargomio"
 
     headers = {
@@ -1187,51 +1191,31 @@ def verify_customer(access_token: str, customer_identification: str) -> bool:
     }
 
     try:
-        response = requests.get(API_CUSTOMERS_URL, headers=headers)
-        
-        try:
-            response_data = response.json()
-        except json.JSONDecodeError:
-            print(f"ERROR: La respuesta no es un JSON válido. Código: {response.status_code}")
-            print(f"Contenido de la respuesta: {response.text[:200]}")
-            return False
+        response = requests.get(API_CUSTOMERS_URL, headers=headers, timeout=30)
+        data = response.json()
 
         if response.status_code == 200:
-            if 'results' in response_data and len(response_data['results']) >= 1:
-                print(f"Cliente con identificación {customer_identification} encontrado.")
-                return True
-            else:
-                print(f"Cliente con identificación {customer_identification} no encontrado.")
-                return False
-        else:
-            print(f"ERROR al verificar el cliente (Código: {response.status_code}).")
-            print(json.dumps(response_data, indent=2, ensure_ascii=False))
-            return False
-            
-    except requests.exceptions.Timeout:
-        print("ERROR: Tiempo de espera agotado al conectar con la API de Siigo.")
+            results = data.get("results") or []
+            return len(results) >= 1
+
+        print("❌ ERROR verify_customer:", response.status_code, data)
         return False
-    except requests.exceptions.ConnectionError:
-        print("ERROR: No se pudo establecer conexión con la API de Siigo.")
-        return False
-    except requests.exceptions.RequestException as e:
-        print(f"ERROR de conexión: {e}")
-        return False
+
     except Exception as e:
-        print(f"ERROR inesperado al verificar cliente: {e}")
+        print("❌ ERROR verify_customer:", e)
         return False
 
 
-def create_customer_siigo(access_token: str, customer_data: dict) -> bool:
+def create_customer_siigo(access_token: str, customer_data: dict):
     """
-    Crea un cliente en Siigo.
+    Crea cliente.
+    Retorna: (True, response_json) o (False, detalle_error_str)
+    NO hace fallback a Medellín.
     """
-    API_URL_CUSTOMERS = "https://api.siigo.com/v1/customers"
-    NOMBRE_DE_MI_APP = "AutomatizacionFacturasEncargomio"
+    url = f"{SIIGO_BASE_URL}/v1/customers"
 
-    if not access_token or access_token == "TU_ACCESS_TOKEN":
-        print("ERROR: Token de acceso inválido.")
-        return False
+    if not access_token:
+        return False, "Token de acceso inválido."
 
     headers = {
         "Content-Type": "application/json",
@@ -1240,52 +1224,27 @@ def create_customer_siigo(access_token: str, customer_data: dict) -> bool:
     }
 
     try:
-        response = requests.post(API_URL_CUSTOMERS, data=json.dumps(customer_data), headers=headers)
-        
+        resp = requests.post(url, json=customer_data, headers=headers, timeout=30)
+
         try:
-            response_data = response.json()
+            data = resp.json()
         except json.JSONDecodeError:
-            print(f"ERROR: La respuesta no es un JSON válido. Código: {response.status_code}")
-            print(f"Contenido de la respuesta: {response.text[:200]}")
-            return False
+            return False, f"Respuesta no JSON. HTTP {resp.status_code}: {resp.text[:400]}"
 
-        if response.status_code == 201:
-            print("¡ÉXITO! Cliente creado correctamente.")
-            print(f"  ID del cliente creado: {response_data.get('id')}")
-            return True
-        else:
-            print(f"ERROR al crear el cliente (Código: {response.status_code}).")
-            print("  Respuesta del API de Siigo:")
-            print(json.dumps(response_data, indent=2, ensure_ascii=False))
-            return False
+        if resp.status_code in (200, 201):
+            return True, data
 
-    except requests.exceptions.Timeout:
-        print("ERROR: Tiempo de espera agotado al conectar con la API de Siigo.")
-        return False
-    except requests.exceptions.ConnectionError:
-        print("ERROR: No se pudo establecer conexión con la API de Siigo.")
-        return False
+        err = data.get("errors") or data.get("Errors") or data
+        return False, f"HTTP {resp.status_code}: {json.dumps(err, ensure_ascii=False)}"
+
     except requests.exceptions.RequestException as e:
-        print(f"ERROR de conexión: {e}")
-        return False
-    except Exception as e:
-        print(f"ERROR inesperado al crear cliente: {e}")
-        return False
+        return False, f"Error de conexión: {e}"
 
-API_SIIGO_INVOICES_URL = "https://api.siigo.com/v1/invoices"
+
+
 
 def create_invoice_siigo(access_token: str, invoice_data: dict):
-    """
-    Crea una factura en Siigo.
-    Retorna:
-      - (True, info_factura_dict) si todo ok
-      - (False, mensaje_error) si falla
-    """
-    if not access_token or access_token == "TU_ACCESS_TOKEN":
-        error_msg = "Token de acceso inválido o no proporcionado"
-        print(f"¡ERROR! {error_msg}")
-        return False, error_msg
-    
+    API_URL = "https://api.siigo.com/v1/invoices"
     NOMBRE_DE_MI_APP = "AutomatizacionFacturasEncargomio"
 
     headers = {
@@ -1295,57 +1254,23 @@ def create_invoice_siigo(access_token: str, invoice_data: dict):
     }
 
     try:
-        response = requests.post(API_SIIGO_INVOICES_URL, data=json.dumps(invoice_data), headers=headers)
-        
-        try:
-            response_data = response.json()
-        except json.JSONDecodeError:
-            error_msg = f"La respuesta no es un JSON válido. Código HTTP: {response.status_code}"
-            print(f"ERROR: {error_msg}")
-            print(f"Contenido de la respuesta: {response.text[:200]}")
-            return False, error_msg
+        response = requests.post(API_URL, json=invoice_data, headers=headers, timeout=30)
+        data = response.json()
 
         if response.status_code == 201:
-            inv_id   = response_data.get('id')
-            name     = response_data.get('document', {}).get('name')
-            prefix   = response_data.get('document', {}).get('prefix')
-            consec   = response_data.get('consecutive')
-
-            print("¡ÉXITO! Factura creada correctamente.")
-            print(f"  ID de la factura creada: {inv_id}")
-            print(f"  Número: {name}-{prefix}-{consec}")
-
-            info_factura = {
-                "id": inv_id,
-                "name": name,
-                "prefix": prefix,
-                "consecutive": consec,
+            return True, {
+                "id": data.get("id"),
+                "name": data.get("document", {}).get("name"),
+                "prefix": data.get("document", {}).get("prefix"),
+                "consecutive": data.get("consecutive"),
             }
-            return True, info_factura
-        else:
-            error_detail = response_data.get('Errors', response_data.get('errors', response_data))
-            error_msg = f"Error HTTP {response.status_code} - {error_detail}"
-            print(f"ERROR al crear la factura (Código: {response.status_code}).")
-            print("  Respuesta del API de Siigo:")
-            print(json.dumps(response_data, indent=2, ensure_ascii=False))
-            return False, error_msg
 
-    except requests.exceptions.Timeout:
-        error_msg = "Tiempo de espera agotado al conectar con la API de Siigo"
-        print(f"ERROR: {error_msg}.")
-        return False, error_msg
-    except requests.exceptions.ConnectionError:
-        error_msg = "No se pudo establecer conexión con la API de Siigo"
-        print(f"ERROR: {error_msg}.")
-        return False, error_msg
-    except requests.exceptions.RequestException as e:
-        error_msg = f"Error de conexión: {str(e)}"
-        print(f"ERROR: {error_msg}")
-        return False, error_msg
+        err = data.get("Errors") or data.get("errors") or data
+        return False, f"HTTP {response.status_code}: {json.dumps(err, ensure_ascii=False)}"
+
     except Exception as e:
-        error_msg = f"Error inesperado: {str(e)}"
-        print(f"ERROR: {error_msg}")
-        return False, error_msg
+        return False, f"Error inesperado: {e}"
+
 
 
 def log_invoice_error(invoice_number, error_reason: str) -> bool:
@@ -1537,47 +1462,83 @@ def get_max_invoice_number(
 
 # ======================= BUILDERS DESDE EXCEL =======================
 
+import re
+
 def build_customer_from_row(cli_row: pd.Series) -> dict:
     """
-    Construye el customer_data para Siigo a partir de una fila de df_clientes.
-    Usa la estructura básica que ya probaste.
+    Construye el payload de cliente para Siigo.
+    FALLA si falta información obligatoria.
+    NO usa Medellín como fallback.
     """
-    identificacion = str(cli_row["Identificación (Obligatorio)"]).strip()
-    nombres = str(cli_row["Nombres del tercero (Obligatorio)"]).strip()
-    apellidos = str(cli_row["Apellidos del tercero (Obligatorio)"]).strip()
-    direccion = str(cli_row.get("Dirección", "")).strip()
-    cod_dep = str(cli_row.get("Código departamento/estado", "")).strip()
-    cod_ciu = str(cli_row.get("Código ciudad", "")).strip()
-    telefono = str(cli_row.get("Teléfono principal", "")).strip()
-    email = str(cli_row.get("Correo electrónico contacto principal", "")).strip()
 
-    customer_data = {
+    identificacion = _clean_text(cli_row.get("Identificación (Obligatorio)"))
+    if not identificacion:
+        raise ValueError("Identificación del cliente vacía")
+
+    nombres = _clean_text(cli_row.get("Nombres del tercero (Obligatorio)"))
+    apellidos = _clean_text(cli_row.get("Apellidos del tercero (Obligatorio)"))
+    if not nombres:
+        raise ValueError(f"Cliente {identificacion}: nombres vacíos")
+    if not apellidos:
+        raise ValueError(f"Cliente {identificacion}: apellidos vacíos")
+
+    telefono = _clean_phone(cli_row.get("Teléfono principal"))
+    if not telefono:
+        raise ValueError(f"Cliente {identificacion}: teléfono vacío o inválido")
+
+    email = _clean_text(cli_row.get("Correo electrónico contacto principal"))
+    if not email:
+        raise ValueError(f"Cliente {identificacion}: correo electrónico vacío")
+
+    # Códigos
+    state_code = _clean_code_numeric(cli_row.get("Código departamento/estado"))
+    city_code  = _clean_code_numeric(cli_row.get("Código ciudad"))
+
+    if not state_code:
+        raise ValueError(f"Cliente {identificacion}: Código departamento/estado vacío")
+    if not city_code:
+        raise ValueError(f"Cliente {identificacion}: Código ciudad vacío")
+
+    # ✅ Normalizaciones típicas:
+    # - state_code debe ir con 2 dígitos (05, 73, etc.)
+    # - city_code en Colombia suele venir con 5 dígitos (05001, 73001, etc.)
+    state_code = state_code.zfill(2)
+    city_code  = city_code.zfill(5)
+
+    # Dirección (si tienes dirección real en Excel, cámbiala aquí)
+    direccion = _clean_text(cli_row.get("Dirección")) or _clean_text(cli_row.get("Direccion"))
+    if not direccion:
+        direccion = "No especificado"  # esto NO afecta ciudad; solo el texto de la dirección
+
+    payload = {
+        "type": "Customer",
         "person_type": "Person",
-        "id_type": "13",
+        "id_type": "13",  # cédula
         "identification": identificacion,
         "name": [nombres, apellidos],
         "address": {
             "address": direccion,
             "city": {
-                "country_code": "Col",
-                "state_code": cod_dep or "05",
-                "city_code": cod_ciu or "05001"
+                "country_code": "CO",   # ✅ en API debe ser CO
+                "state_code": state_code,
+                "city_code": city_code
             }
         },
-        "phones": [
-            {
-                "number": telefono
-            }
-        ],
-        "contacts": [
-            {
-                "first_name": nombres,
-                "last_name": apellidos,
-                "email": email
-            }
-        ]
+        "phones": [{"number": telefono}],
+        "contacts": [{
+            "first_name": nombres,
+            "last_name": apellidos,
+            "email": email
+        }]
     }
-    return customer_data
+
+    return payload
+
+
+
+
+
+
 
 
 from datetime import datetime
@@ -1858,8 +1819,19 @@ def run_facturacion_masiva(
         if not exists:
             st.write(f"Cliente {ident} no existe en Siigo. Creando...")
             customer_data = build_customer_from_row(cli_row)
-            if not create_customer_siigo(token, customer_data):
-                msg = f"No se pudo crear el cliente {ident} en Siigo."
+
+            # ✅ FIX: create_customer_siigo retorna tupla (ok, resp)
+            ok_cli, resp_cli = create_customer_siigo(token, customer_data)
+            if not ok_cli:
+                msg = f"No se pudo crear el cliente {ident} en Siigo. Detalle: {resp_cli}"
+                st.error(msg)
+                log_invoice_error(id_ingreso, msg)
+                err_count += 1
+                continue
+
+            # (opcional pero recomendado) re-validar
+            if not verify_customer(token, ident):
+                msg = f"Cliente {ident} aparentemente se creó, pero no aparece en verify_customer."
                 st.error(msg)
                 log_invoice_error(id_ingreso, msg)
                 err_count += 1
