@@ -844,7 +844,12 @@ else:
     # -----------------------------------------------------------------------
     # FILTRO: excluir valores negativos y "ABONO INTERESES AHORROS"
     # -----------------------------------------------------------------------
-    amount_cols = [c for c in ["Valor", "VALOR", "Valor Total", "Monto"] if c in df_ing_id.columns]
+    amount_cols = [c for c in [
+        "MontoCop", "MontoCOP", "Monto COP",
+        "Valor", "VALOR", "Valor Total", "VALOR TOTAL",
+        "Monto"
+    ] if c in df_ing_id.columns]
+    
     if amount_cols:
         for c in amount_cols:
             df_ing_id[c] = pd.to_numeric(df_ing_id[c], errors="coerce")
@@ -891,7 +896,7 @@ else:
         "Descripción", "Descripcion Motivo",
         "Documento", "Transaccion", "Oficina de Recaudo", "ID Origen/Destino",
         "REFERENCIA", "Referencia 1", "Referencia 2",
-        "Valor", "VALOR", "Valor Total", "Monto",
+        "Valor", "VALOR", "Valor Total", "Monto","MontoCOP",
         "Nombre del producto",
     ]
     cols_presentes = [c for c in cols_preferencia if c in df_ing_id.columns]
