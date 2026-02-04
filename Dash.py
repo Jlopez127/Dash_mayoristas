@@ -1137,7 +1137,14 @@ def _clean_code_numeric(x) -> str:
     s = re.sub(r"[^\d]", "", s)
     return s
 
-
+def _clean_id(x) -> str:
+    s = "" if x is None else str(x).strip()
+    s_low = s.lower()
+    if s_low in {"", "nan", "none", "null", "<na>"}:
+        return ""
+    # quita .0 típico cuando Excel/Pandas lo leyó como float
+    s = re.sub(r"\.0$", "", s)
+    return s
 
 
 
@@ -1148,7 +1155,7 @@ SIIGO_BASE_URL = "https://api.siigo.com"
 NOMBRE_DE_MI_APP = "AutomatizacionFacturasEncargomio"
 
 
-def obtain_token():
+def obtain_token() -> str | None:
     """
     Obtiene token de Siigo usando st.secrets["siigo"]["username"] y ["access_key"].
     """
@@ -1185,9 +1192,9 @@ def obtain_token():
 
 
 
+
 def verify_customer(access_token: str, customer_identification: str) -> bool:
     API_CUSTOMERS_URL = f"https://api.siigo.com/v1/customers?identification={customer_identification}"
-    NOMBRE_DE_MI_APP = "AutomatizacionFacturasEncargomio"
 
     headers = {
         "Content-Type": "application/json",
@@ -1250,7 +1257,6 @@ def create_customer_siigo(access_token: str, customer_data: dict):
 
 def create_invoice_siigo(access_token: str, invoice_data: dict):
     API_URL = "https://api.siigo.com/v1/invoices"
-    NOMBRE_DE_MI_APP = "AutomatizacionFacturasEncargomio"
 
     headers = {
         "Content-Type": "application/json",
@@ -1303,12 +1309,7 @@ def log_invoice_error(invoice_number, error_reason: str) -> bool:
 
 
 
-import requests
-import json
 
-SIIGO_BASE_URL = "https://api.siigo.com"
-
-NOMBRE_DE_MI_APP = "AutomatizacionFacturasEncargomio"
 
 
 def get_next_invoice_number(access_token: str) -> int | None:
@@ -1471,21 +1472,38 @@ import re
 
 def build_customer_from_row(cli_row: pd.Series) -> dict:
     """
-    Construye el payload de cliente para Siigo.
-    FALLA si falta información obligatoria.
-    NO usa Medellín como fallback.
+    Construye payload de cliente para Siigo.
+    NO revienta si apellidos vienen vacíos: intenta inferirlos.
     """
 
-    identificacion = _clean_text(cli_row.get("Identificación (Obligatorio)"))
+    identificacion = _clean_id(cli_row.get("Identificación (Obligatorio)"))
     if not identificacion:
         raise ValueError("Identificación del cliente vacía")
 
     nombres = _clean_text(cli_row.get("Nombres del tercero (Obligatorio)"))
     apellidos = _clean_text(cli_row.get("Apellidos del tercero (Obligatorio)"))
+
+    # Si existe un campo de nombre completo en tu base (si no, no pasa nada)
+    nombre_completo = _clean_text(cli_row.get("Nombre completo"))
+
+    if not nombres and nombre_completo:
+        nombres = nombre_completo
+
+    # ✅ Si apellidos está vacío, intenta partir nombres
+    if not apellidos:
+        tokens = [t for t in re.split(r"\s+", nombres.strip()) if t]
+        if len(tokens) >= 2:
+            apellidos = tokens[-1]
+            nombres = " ".join(tokens[:-1])
+        elif len(tokens) == 1:
+            # último recurso: no dejar vacío (Siigo no acepta vacío)
+            apellidos = tokens[0]
+            nombres = tokens[0]
+
     if not nombres:
         raise ValueError(f"Cliente {identificacion}: nombres vacíos")
     if not apellidos:
-        raise ValueError(f"Cliente {identificacion}: apellidos vacíos")
+        raise ValueError(f"Cliente {identificacion}: apellidos vacíos (no se pudo inferir)")
 
     telefono = _clean_phone(cli_row.get("Teléfono principal"))
     if not telefono:
@@ -1495,36 +1513,21 @@ def build_customer_from_row(cli_row: pd.Series) -> dict:
     if not email:
         raise ValueError(f"Cliente {identificacion}: correo electrónico vacío")
 
-    # Códigos
-    state_code = _clean_code_numeric(cli_row.get("Código departamento/estado"))
-    city_code  = _clean_code_numeric(cli_row.get("Código ciudad"))
-
-    if not state_code:
-        raise ValueError(f"Cliente {identificacion}: Código departamento/estado vacío")
-    if not city_code:
-        raise ValueError(f"Cliente {identificacion}: Código ciudad vacío")
-
-    # ✅ Normalizaciones típicas:
-    # - state_code debe ir con 2 dígitos (05, 73, etc.)
-    # - city_code en Colombia suele venir con 5 dígitos (05001, 73001, etc.)
-    state_code = state_code.zfill(2)
-    city_code  = city_code.zfill(5)
-
-    # Dirección (si tienes dirección real en Excel, cámbiala aquí)
-    direccion = _clean_text(cli_row.get("Dirección")) or _clean_text(cli_row.get("Direccion"))
-    if not direccion:
-        direccion = "No especificado"  # esto NO afecta ciudad; solo el texto de la dirección
+    state_code = _clean_text(cli_row.get("Código departamento/estado"))
+    city_code  = _clean_text(cli_row.get("Código ciudad"))
+    if not state_code or not city_code:
+        raise ValueError(f"Cliente {identificacion}: código de ciudad/departamento inválido")
 
     payload = {
         "type": "Customer",
         "person_type": "Person",
-        "id_type": "13",  # cédula
+        "id_type": "13",
         "identification": identificacion,
         "name": [nombres, apellidos],
         "address": {
-            "address": direccion,
+            "address": _clean_text(cli_row.get("Dirección")) or "No especificado",
             "city": {
-                "country_code": "CO",   # ✅ en API debe ser CO
+                "country_code": "CO",
                 "state_code": state_code,
                 "city_code": city_code
             }
@@ -1538,6 +1541,7 @@ def build_customer_from_row(cli_row: pd.Series) -> dict:
     }
 
     return payload
+
 
 
 
@@ -1600,7 +1604,8 @@ def build_invoice_from_row(
 
     # 3) Total cobrado al cliente (T)
     total = None
-    for col in ["Monto COP", "MontoCOP", "Monto"]:
+    for col in ["MontoCop", "Monto COP", "MontoCOP", "Monto"]:
+
         if col in ing_row.index and pd.notna(ing_row[col]):
             try:
                 total = float(ing_row[col])
@@ -1708,33 +1713,28 @@ def run_facturacion_masiva(
     doc_id: int,
     seller_id: int,
     payment_id: int,
-    casillero_actual: str,              # 👈 OBLIGATORIO
+    casillero_actual: str,
     iva_19_id: int | None = None,
-    source_filename: str | None = None,  # nombre del archivo de ingresos en Dropbox
+    source_filename: str | None = None,
 ):
-    """
-    - Usa df_ing_pend (ingresos con Id_cliente y Factura vacía, ya preparados)
-    - Usa df_clientes (todos los clientes del casillero)
-    Además:
-    - Crea cliente en Siigo si no existe.
-    - Crea factura en Siigo.
-    - Escribe el número de factura en df_ing_pend["Factura"].
-    - Actualiza el Excel original de ingresos en Dropbox usando ID_INGRESO.
-    """
+    import time
+    import io
+
     st.write("=== Iniciando proceso de facturación MASIVA en Siigo ===")
 
-    # =================================================================================
-    # ## FIX: normalizar IDs para evitar 123.0 / 1010234396.0
-    # =================================================================================
-    def _clean_id(x) -> str:
-        s = "" if x is None else str(x).strip()
-        s_low = s.lower()
-        if s_low in {"", "nan", "none", "null", "<na>"}:
-            return ""
-        # quita .0 típico cuando Excel/Pandas lo leyó como float
-        s = re.sub(r"\.0$", "", s)
-        return s
+    # =========================
+    # Config: tandas y checkpoint
+    # =========================
+    MAX_FACTURAS_POR_TANDA = 40
+    SLEEP_SEGUNDOS = 60
+    CHECKPOINT_CADA = 10
 
+    facturas_en_tanda = 0
+    facturas_desde_checkpoint = 0
+
+    # =========================
+    # Normalizaciones
+    # =========================
     # Normalizar Id_cliente en ingresos (por si viene como float)
     if "Id_cliente" in df_ing_pend.columns:
         df_ing_pend["Id_cliente"] = df_ing_pend["Id_cliente"].apply(_clean_id)
@@ -1746,41 +1746,42 @@ def run_facturacion_masiva(
     if df_clientes is not None and not df_clientes.empty and COL_ID in df_clientes.columns:
         df_clientes[COL_ID] = df_clientes[COL_ID].apply(_clean_id)
 
-    # 1) Obtener token una sola vez
+    # Asegurar columna Factura
+    if "Factura" not in df_ing_pend.columns:
+        df_ing_pend["Factura"] = pd.NA
+
+    # =========================
+    # 1) Token
+    # =========================
     st.write("1️⃣ Obteniendo token de autenticación...")
     token = obtain_token()
     if not token:
         st.error("ERROR CRÍTICO: No se pudo obtener el token de autenticación. No se puede continuar.")
         return
 
-    # 2) Consultar desde Siigo el ÚLTIMO número de factura
+    # =========================
+    # 2) Consecutivo
+    # =========================
     st.write("2️⃣ Calculando máximo número de factura en Siigo (recorriendo varias páginas)...")
     last_number = get_max_invoice_number(token, max_pages=30)
     if last_number is None:
-        st.error(
-            "No se pudo calcular el consecutivo máximo de facturas en Siigo. "
-            "Revisa logs de get_max_invoice_number."
-        )
+        st.error("No se pudo calcular el consecutivo máximo de facturas en Siigo. Revisa logs.")
         return
 
     current_number = int(last_number) + 1
 
-    # 🔒 Límite legal de numeración de facturas
     FACTURA_MAX_NUMERO = 150_000
-
-    # Corte temprano (antes de arrancar el loop)
     if current_number > FACTURA_MAX_NUMERO - 1:
         st.error(
-            f"❌ No es posible continuar con la facturación.\n\n"
-            f"El consecutivo de facturación alcanzó el límite legal permitido "
-            f"({FACTURA_MAX_NUMERO - 1}).\n\n"
-            f"Último consecutivo detectado: {last_number}."
+            f"❌ No es posible continuar.\n"
+            f"Se alcanzó el límite legal ({FACTURA_MAX_NUMERO - 1}). "
+            f"Último detectado: {last_number}."
         )
         return
 
     st.write(f"➡️ Primer número de factura a usar (max + 1): {current_number}")
 
-    # Índice por identificación para acceso rápido (YA normalizado)
+    # Índice de clientes por identificación
     cli_idx = {
         _clean_id(row.get(COL_ID, "")): row
         for _, row in df_clientes.iterrows()
@@ -1791,162 +1792,37 @@ def run_facturacion_masiva(
     ok_count = 0
     err_count = 0
 
-    # Asegurar que exista columna Factura en el DF de pendientes
-    if "Factura" not in df_ing_pend.columns:
-        df_ing_pend["Factura"] = pd.NA
+    # =========================
+    # 3) Preparar archivo Dropbox para checkpoint
+    # =========================
+    df_file = None
+    fullpath = None
 
-    for i, (idx, ing_row) in enumerate(df_ing_pend.iterrows(), start=1):
-        ident = _clean_id(ing_row.get("Id_cliente", ""))
-        id_ingreso = ing_row.get("ID_INGRESO", f"fila_{i}")
+    if source_filename:
+        try:
+            base_folder = get_base_folder()
+            fullpath = f"{base_folder}/{source_filename}"
 
-        st.write(
-            f"--- ({i}/{total}) Procesando ingreso {id_ingreso} | "
-            f"cliente {ident} | factura sugerida inicial {current_number} ---"
-        )
+            df_file = _try_download_excel(fullpath)
+            if df_file is None or df_file.empty:
+                st.warning(f"⚠️ No se pudo leer archivo de ingresos para checkpoint: {fullpath}")
+                df_file = None
+            else:
+                if "ID_INGRESO" not in df_file.columns:
+                    df_file["ID_INGRESO"] = pd.NA
+                if "Factura" not in df_file.columns:
+                    df_file["Factura"] = pd.NA
 
-        if not ident:
-            msg = "Id_cliente vacío en el ingreso."
-            st.warning(msg)
-            log_invoice_error(id_ingreso, msg)
-            err_count += 1
-            continue
+        except Exception as e:
+            st.warning(f"⚠️ No se pudo preparar archivo Dropbox para checkpoint: {e}")
+            df_file = None
+            fullpath = None
 
-        cli_row = cli_idx.get(ident)
-        if cli_row is None:
-            msg = f"Cliente {ident} no está en la base de Clientes del casillero."
-            st.warning(msg)
-            log_invoice_error(id_ingreso, msg)
-            err_count += 1
-            continue
-
-        # 3) Verificar/crear cliente en Siigo
-        exists = verify_customer(token, ident)
-        if not exists:
-            st.write(f"Cliente {ident} no existe en Siigo. Creando...")
-            customer_data = build_customer_from_row(cli_row)
-
-            # ✅ FIX: create_customer_siigo retorna tupla (ok, resp)
-            ok_cli, resp_cli = create_customer_siigo(token, customer_data)
-            if not ok_cli:
-                msg = f"No se pudo crear el cliente {ident} en Siigo. Detalle: {resp_cli}"
-                st.error(msg)
-                log_invoice_error(id_ingreso, msg)
-                err_count += 1
-                continue
-
-            # (opcional pero recomendado) re-validar
-            if not verify_customer(token, ident):
-                msg = f"Cliente {ident} aparentemente se creó, pero no aparece en verify_customer."
-                st.error(msg)
-                log_invoice_error(id_ingreso, msg)
-                err_count += 1
-                continue
-
-        # 4) Intentar crear la factura con mecanismo de reintento
-        intentos = 0
-        max_intentos = 20
-
-        while intentos < max_intentos:
-            intentos += 1
-            numero_en_uso = current_number
-
-            # 🔒 Corte duro por límite legal de facturación
-            if numero_en_uso > FACTURA_MAX_NUMERO - 1:
-                msg = f"Se alcanzó el límite legal de facturación ({FACTURA_MAX_NUMERO - 1})."
-                st.error("❌ " + msg)
-                return
-
-            st.write(f"   ➜ Intento #{intentos} con número de factura {numero_en_uso} ...")
-
-            try:
-                invoice_data = build_invoice_from_row(
-                    ing_row=ing_row,
-                    doc_id=doc_id,
-                    seller_id=seller_id,
-                    payment_id=payment_id,
-                    iva_19_id=iva_19_id,                  # <-- si le pasas 8368, queda fijo
-                    number=numero_en_uso,
-                    casillero_actual=str(casillero_actual),
-                )
-            except Exception as e:
-                err_msg = f"Error armando la factura para ingreso {id_ingreso}: {e}"
-                st.error(err_msg)
-                log_invoice_error(id_ingreso, err_msg)
-                err_count += 1
-                break
-
-            ok, err_msg = create_invoice_siigo(token, invoice_data)
-
-            if ok:
-                num_factura = str(numero_en_uso)
-                df_ing_pend.loc[idx, "Factura"] = num_factura
-                st.success(f"✅ Factura {num_factura} creada correctamente para ingreso {id_ingreso}")
-                ok_count += 1
-                current_number = numero_en_uso + 1
-                break
-
-            texto_err = str(err_msg or "")
-            if "already_exists" in texto_err or "number already exists" in texto_err:
-                st.warning(
-                    f"⚠️ El número {numero_en_uso} ya existe en Siigo. "
-                    "Probando con el siguiente consecutivo..."
-                )
-                current_number = numero_en_uso + 1
-                continue
-
-            err_count += 1
-            log_invoice_error(id_ingreso, err_msg or "Error desconocido")
-            st.error(f"❌ Error creando factura para ingreso {id_ingreso}: {err_msg}")
-            break
-
-        else:
-            msg = (
-                f"No se pudo crear factura para ingreso {id_ingreso} "
-                f"después de {max_intentos} intentos de consecutivo."
-            )
-            st.error("❌ " + msg)
-            log_invoice_error(id_ingreso, msg)
-            err_count += 1
-
-    st.write("=== Proceso de facturación finalizado ===")
-    st.write(f"✔️ Facturas creadas: {ok_count}")
-    st.write(f"⚠️ Errores: {err_count}")
-
-    # 5) Actualizar el Excel original en Dropbox USANDO EL ARCHIVO DEL BANCO
-    try:
-        df_to_update = df_ing_pend.dropna(subset=["Factura"])
-        if df_to_update.empty:
-            st.write("ℹ️ No hay facturas nuevas para actualizar en el Excel.")
+    def _flush_checkpoint():
+        """Sube a Dropbox el df_file actualizado con facturas creadas hasta el momento."""
+        nonlocal df_file, fullpath
+        if df_file is None or not fullpath:
             return
-
-        if not source_filename:
-            st.write("ℹ️ No se recibió 'source_filename', no se actualiza Excel en Dropbox.")
-            return
-
-        base_folder = get_base_folder()
-        fullpath = f"{base_folder}/{source_filename}"
-
-        df_file = _try_download_excel(fullpath)
-        if df_file is None or df_file.empty:
-            st.error(f"⚠️ No se pudo leer el archivo de ingresos en Dropbox: {fullpath}")
-            return
-
-        if "ID_INGRESO" not in df_file.columns:
-            df_file["ID_INGRESO"] = pd.NA
-        if "Factura" not in df_file.columns:
-            df_file["Factura"] = pd.NA
-
-        for _, r in df_to_update.iterrows():
-            id_ing = r.get("ID_INGRESO")
-            factura = r.get("Factura")
-
-            if pd.isna(id_ing):
-                continue
-            if pd.isna(factura) or str(factura).strip() == "":
-                continue
-
-            mask = df_file["ID_INGRESO"].astype(str).str.strip().eq(str(id_ing).strip())
-            df_file.loc[mask, "Factura"] = factura
 
         buf_up = io.BytesIO()
         with pd.ExcelWriter(buf_up, engine="openpyxl") as w:
@@ -1954,10 +1830,246 @@ def run_facturacion_masiva(
         buf_up.seek(0)
 
         dbx.files_upload(buf_up.read(), fullpath, mode=dropbox.files.WriteMode.overwrite)
-        st.write(f"🔄 Excel de ingresos actualizado con las facturas en: {source_filename}")
+        st.info(f"✅ CHECKPOINT guardado en Dropbox: {source_filename}")
 
+    # =========================
+    # 4) Loop principal
+    # =========================
+    try:
+        for i, (idx, ing_row) in enumerate(df_ing_pend.iterrows(), start=1):
+            ident = _clean_id(ing_row.get("Id_cliente", ""))
+            id_ingreso = ing_row.get("ID_INGRESO", f"fila_{i}")
+
+            st.write(
+                f"--- ({i}/{total}) Procesando ingreso {id_ingreso} | "
+                f"cliente {ident} | factura sugerida inicial {current_number} ---"
+            )
+
+            if not ident:
+                msg = "Id_cliente vacío en el ingreso."
+                st.warning(msg)
+                log_invoice_error(id_ingreso, msg)
+                err_count += 1
+                continue
+
+            cli_row = cli_idx.get(ident)
+            if cli_row is None:
+                msg = f"Cliente {ident} no está en la base de Clientes del casillero."
+                st.warning(msg)
+                log_invoice_error(id_ingreso, msg)
+                err_count += 1
+                continue
+
+            # 3) Verificar/crear cliente
+            exists = verify_customer(token, ident)
+            if not exists:
+                st.write(f"Cliente {ident} no existe en Siigo. Creando...")
+                customer_data = build_customer_from_row(cli_row)
+
+                ok_cli, resp_cli = create_customer_siigo(token, customer_data)
+                if not ok_cli:
+                    msg = f"No se pudo crear el cliente {ident} en Siigo. Detalle: {resp_cli}"
+                    st.error(msg)
+                    log_invoice_error(id_ingreso, msg)
+                    err_count += 1
+                    continue
+
+                # ✅ retry verify (porque a veces Siigo demora en reflejar)
+                max_verify = 6
+                verified = False
+                for t in range(max_verify):
+                    time.sleep(1.5)
+                    if verify_customer(token, ident):
+                        verified = True
+                        break
+                if not verified:
+                    msg = f"Cliente {ident} se creó, pero no aparece aún en verify_customer tras reintentos."
+                    st.warning(msg)
+                    log_invoice_error(id_ingreso, msg)
+                    # OJO: no paramos; intentamos igual facturar (a veces factura pasa)
+                    # continue
+
+            # 4) Intentar crear factura
+            intentos = 0
+            max_intentos = 20
+
+            while intentos < max_intentos:
+                intentos += 1
+                numero_en_uso = current_number
+
+                if numero_en_uso > FACTURA_MAX_NUMERO - 1:
+                    st.error(f"❌ Límite legal alcanzado ({FACTURA_MAX_NUMERO - 1}).")
+                    return
+
+                st.write(f"   ➜ Intento #{intentos} con número de factura {numero_en_uso} ...")
+
+                try:
+                    invoice_data = build_invoice_from_row(
+                        ing_row=ing_row,
+                        doc_id=doc_id,
+                        seller_id=seller_id,
+                        payment_id=payment_id,
+                        iva_19_id=iva_19_id,
+                        number=numero_en_uso,
+                        casillero_actual=str(casillero_actual),
+                    )
+                except Exception as e:
+                    err_msg = f"Error armando la factura para ingreso {id_ingreso}: {e}"
+                    st.error(err_msg)
+                    log_invoice_error(id_ingreso, err_msg)
+                    err_count += 1
+                    break
+
+                ok, err_msg = create_invoice_siigo(token, invoice_data)
+
+                if ok:
+                    num_factura = str(numero_en_uso)
+                    df_ing_pend.loc[idx, "Factura"] = num_factura
+                    st.success(f"✅ Factura {num_factura} creada correctamente para ingreso {id_ingreso}")
+                    ok_count += 1
+                    current_number = numero_en_uso + 1
+
+                    # =========================
+                    # ✅ Actualizar df_file (para checkpoint)
+                    # =========================
+                    if df_file is not None and "ID_INGRESO" in df_file.columns:
+                        mask = df_file["ID_INGRESO"].astype(str).str.strip().eq(str(id_ingreso).strip())
+                        df_file.loc[mask, "Factura"] = num_factura
+
+                    # =========================
+                    # ✅ Checkpoint cada 10
+                    # =========================
+                    facturas_desde_checkpoint += 1
+                    if facturas_desde_checkpoint >= CHECKPOINT_CADA:
+                        try:
+                            _flush_checkpoint()
+                        except Exception as e:
+                            st.warning(f"⚠️ No se pudo guardar checkpoint: {e}")
+                        facturas_desde_checkpoint = 0
+
+                    # =========================
+                    # ✅ Tandas de 40 + sleep 60s y retomar
+                    # =========================
+                    facturas_en_tanda += 1
+                    if facturas_en_tanda >= MAX_FACTURAS_POR_TANDA:
+                        st.warning(
+                            f"🟡 Se alcanzaron {MAX_FACTURAS_POR_TANDA} facturas. "
+                            f"Pausando {SLEEP_SEGUNDOS}s para evitar rate limit..."
+                        )
+                        time.sleep(SLEEP_SEGUNDOS)
+                        facturas_en_tanda = 0
+
+                    break  # sale del while de intentos
+
+                texto_err = str(err_msg or "")
+                
+                
+                # ✅ FIX: Siigo a veces calcula el total con ±0.01 por redondeos.
+                # Si devuelve invalid_total_payments, ajustamos payments.value al total que Siigo espera y reintentamos.
+                if "invalid_total_payments" in texto_err:
+                    try:
+                        import re
+                        m = re.search(r"calculated is\s*([0-9]+(?:\.[0-9]+)?)", texto_err)
+                        if m:
+                            siigo_total = float(m.group(1))
+                            invoice_data["payments"][0]["value"] = siigo_total
+                
+                            st.warning(
+                                f"⚠️ Ajuste por redondeo: payments.value -> {siigo_total}. "
+                                "Reintentando la MISMA factura..."
+                            )
+                            time.sleep(1.0)
+                
+                            # ✅ Reintenta inmediatamente con el invoice_data ajustado
+                            ok2, err2 = create_invoice_siigo(token, invoice_data)
+                            if ok2:
+                                num_factura = str(numero_en_uso)
+                                df_ing_pend.loc[idx, "Factura"] = num_factura
+                                st.success(f"✅ Factura {num_factura} creada correctamente (ajuste redondeo) para ingreso {id_ingreso}")
+                                ok_count += 1
+                                current_number = numero_en_uso + 1
+                
+                                # actualizar df_file para checkpoint
+                                if df_file is not None and "ID_INGRESO" in df_file.columns:
+                                    mask = df_file["ID_INGRESO"].astype(str).str.strip().eq(str(id_ingreso).strip())
+                                    df_file.loc[mask, "Factura"] = num_factura
+                
+                                # checkpoint cada 10
+                                facturas_desde_checkpoint += 1
+                                if facturas_desde_checkpoint >= CHECKPOINT_CADA:
+                                    try:
+                                        _flush_checkpoint()
+                                    except Exception as e:
+                                        st.warning(f"⚠️ No se pudo guardar checkpoint: {e}")
+                                    facturas_desde_checkpoint = 0
+                
+                                # tandas de 40
+                                facturas_en_tanda += 1
+                                if facturas_en_tanda >= MAX_FACTURAS_POR_TANDA:
+                                    st.warning(
+                                        f"🟡 Se alcanzaron {MAX_FACTURAS_POR_TANDA} facturas. "
+                                        f"Pausando {SLEEP_SEGUNDOS}s para evitar rate limit..."
+                                    )
+                                    time.sleep(SLEEP_SEGUNDOS)
+                                    facturas_en_tanda = 0
+                
+                                break  # ✅ salimos del while intentos (ya quedó ok)
+                
+                            else:
+                                # si todavía falla, seguimos con el flujo normal
+                                err_msg = err2
+                                texto_err = str(err2 or "")
+                    except Exception:
+                        pass
+
+
+                
+
+                # si el número ya existe, probar el siguiente
+                if "already_exists" in texto_err or "number already exists" in texto_err:
+                    st.warning(f"⚠️ El número {numero_en_uso} ya existe. Probando siguiente...")
+                    current_number = numero_en_uso + 1
+                    continue
+
+                # ✅ si rate limit / servicio caído, esperar y reintentar
+                if "requests_limit" in texto_err or "Rate limit" in texto_err:
+                    st.warning("⚠️ Rate limit. Esperando 6s y reintentando...")
+                    time.sleep(6)
+                    continue
+
+                if "product_service" in texto_err:
+                    st.warning("⚠️ Siigo Products service caído. Esperando 20s y reintentando...")
+                    time.sleep(20)
+                    continue
+
+                err_count += 1
+                log_invoice_error(id_ingreso, err_msg or "Error desconocido")
+                st.error(f"❌ Error creando factura para ingreso {id_ingreso}: {err_msg}")
+                break
+
+            else:
+                msg = f"No se pudo crear factura para ingreso {id_ingreso} después de {max_intentos} intentos."
+                st.error("❌ " + msg)
+                log_invoice_error(id_ingreso, msg)
+                err_count += 1
+
+    finally:
+        # ✅ Si se cae por excepción o el usuario corta, intenta guardar lo último
+        try:
+            _flush_checkpoint()
+        except Exception:
+            pass
+
+    st.write("=== Proceso de facturación finalizado ===")
+    st.write(f"✔️ Facturas creadas: {ok_count}")
+    st.write(f"⚠️ Errores: {err_count}")
+
+    # ✅ Guardado final (otra vez) por si no alcanzó checkpoint exacto
+    try:
+        _flush_checkpoint()
     except Exception as e:
-        st.error(f"⚠️ No se pudo actualizar el Excel de ingresos con las facturas: {e}")
+        st.warning(f"⚠️ No se pudo guardar el checkpoint final: {e}")
+
 
 
 
