@@ -194,10 +194,10 @@ PASSWORDS = {
     "clave_jimmy":       "14856 - Jimmy Cortes",
     "clave_elvis":       "11591 - Paula Herrera",
     "clave_maria":       "1444 - Maria Moises",
-    "clave_julian":       "13608 - julian sanchez",
-    "clave_juan":     "9680 - Juan Felipe Laverde" 
+    "clave_julian":      "13608 - julian sanchez",
+    "clave_juan":        "9680 - Juan Felipe Laverde",
+    "clave_cristian":    "14825 - Cristian Javier Castro",   # 👈 NUEVO
 }
-
 
 # 4) Pedir clave en el sidebar
 st.sidebar.title("🔒 Acceso Mayorista")
@@ -233,9 +233,11 @@ SHEET_TO_CAS = {
     "14856 - Jimmy Cortes":        "14856",
     "11591 - Paula Herrera":       "11591",
     "1444 - Maria Moises":         "1444",
-    "9680 - Juan Felipe Laverde": "9680",
+    "9680 - Juan Felipe Laverde":  "9680",
     "13608 - julian sanchez":      "13608",
+    "14825 - Cristian Javier Castro": "14825",   # 👈 NUEVO
 }
+
 casillero_actual = SHEET_TO_CAS.get(sheet_name)
 
 # 🚚 Carga silenciosa de IngresosConID a sesión (sin renderizar)
