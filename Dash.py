@@ -636,6 +636,7 @@ COLS_STR_CRITICAS = [
     COL_TEL,   # Teléfono principal
 ]
 
+# 1) Limpiar primero (convierte a string, quita espacios y ".0" si venía como float)
 for c in COLS_STR_CRITICAS:
     if c in df_clientes.columns:
         df_clientes[c] = (
@@ -644,6 +645,22 @@ for c in COLS_STR_CRITICAS:
             .str.strip()
             .str.replace(r"\.0$", "", regex=True)
         )
+
+# 2) ✅ Reponer ceros a la izquierda (NO daña los que ya están correctos)
+#    Departamento: 2 dígitos (ej: 05, 11, 76...)
+#    Ciudad:       5 dígitos (ej: 05001, 11001...)
+if COL_DEP in df_clientes.columns:
+    df_clientes[COL_DEP] = df_clientes[COL_DEP].fillna("").str.zfill(2)
+
+if COL_CIU in df_clientes.columns:
+    df_clientes[COL_CIU] = df_clientes[COL_CIU].fillna("").str.zfill(5)
+
+# 3) ⛔ Evitar "0" / "00" / "00000" que rompe Siigo (códigos inválidos)
+if COL_DEP in df_clientes.columns:
+    df_clientes.loc[df_clientes[COL_DEP].isin(["0", "00"]), COL_DEP] = ""
+
+if COL_CIU in df_clientes.columns:
+    df_clientes.loc[df_clientes[COL_CIU].isin(["0", "00000"]), COL_CIU] = ""
 
 # === Normalización de IDs ===
 def norm_id(s: object) -> str:
@@ -661,7 +678,6 @@ for col, val in DEFAULTS_STATIC.items():
 for col_out, col_src in DERIVED_FROM_NAME.items():
     df_clientes.loc[mask_tiene_id, col_out] = df_clientes.loc[mask_tiene_id, col_out].fillna(df_clientes[col_src])
 
-# Ruta de guardado
 # Ruta de guardado
 base_folder = get_base_folder()
 clientes_path = f"{base_folder}/Clientes_{casillero_actual}.xlsx" if casillero_actual else None
@@ -1515,10 +1531,17 @@ def build_customer_from_row(cli_row: pd.Series) -> dict:
     if not email:
         raise ValueError(f"Cliente {identificacion}: correo electrónico vacío")
 
-    state_code = _clean_text(cli_row.get("Código departamento/estado"))
-    city_code  = _clean_text(cli_row.get("Código ciudad"))
+    state_code = _clean_code_numeric(cli_row.get("Código departamento/estado")).zfill(2)
+    city_code  = _clean_code_numeric(cli_row.get("Código ciudad")).zfill(5)
+    
+    # ⛔ Bloquear "0" / vacíos
+    if state_code in {"00", "0"} or city_code in {"00000", "0"}:
+        raise ValueError(f"Cliente {identificacion}: código de ciudad/departamento inválido (0)")
+    
     if not state_code or not city_code:
         raise ValueError(f"Cliente {identificacion}: código de ciudad/departamento inválido")
+
+    
 
     payload = {
         "type": "Customer",
