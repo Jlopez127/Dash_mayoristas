@@ -796,6 +796,7 @@ with st.container(border=True):
 
 # ======================= (3) Ver tabla (aplicando filtro) ====================
 # Toma siempre lo último desde session_state (post-guardado)
+# ======================= (3) Ver tabla (SOLO si se busca + match exacto) ====================
 ing_sess = st.session_state.get("ingresos_id_archivos", {}) or {}
 df_clientes = ing_sess.get(f"Clientes_{casillero_actual}.xlsx", df_clientes)
 
@@ -803,19 +804,26 @@ if df_clientes is None:
     df_clientes = pd.DataFrame(columns=REQUIRED_COLS)
 
 with st.container():
-    if 'filt_id' in locals() and filt_id:
+    # No mostrar tabla a menos que se busque
+    if not filt_id or not str(filt_id).strip():
+        st.info("Escribe una identificación para buscar.")
+    else:
+        q_raw = str(filt_id).strip()
+        q_norm = norm_id(q_raw)  # usa tu normalizador (quita . , espacios, etc)
+
+        # Match exacto: por ID crudo o por ID normalizado
         mask = (
-            df_clientes[COL_ID]
-            .astype(str).str.strip()
-            .str.contains(str(filt_id).strip(), case=False, na=False)
+            df_clientes[COL_ID].astype(str).str.strip().eq(q_raw)
+            | df_clientes["_id_norm"].astype(str).str.strip().eq(q_norm)
         )
+
         df_mostrar = df_clientes.loc[mask].copy()
+
         if df_mostrar.empty:
             st.info("No existe cliente con ese ID.")
         else:
             st.dataframe(df_mostrar, use_container_width=True)
-    else:
-        st.dataframe(df_clientes, use_container_width=True)
+
 # ===================== /FACTURACIÓN — CLIENTES =====================
 
 ############################################ /FACTURACIÓN 2!! ###########################################################
