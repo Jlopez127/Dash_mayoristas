@@ -270,20 +270,31 @@ st.markdown(f"## Última actualización: **{ultima.strftime('%Y-%m-%d')}**")
 
 st.header("💰 Saldo al cierre de la última actualización")
 
-# Filtra los "Total" de la última fecha de carga
-df_tot_ultima = df[
-    (df["Tipo"].astype(str).str.strip().str.lower() == "total") &
-    (df["Fecha de Carga"] == ultima)
+# Normalizar
+df_totales = df[
+    df["Tipo"].astype(str).str.strip().str.lower() == "total"
 ].copy()
 
-if not df_tot_ultima.empty:
-    # Asegura numérico y descarta nulos
-    df_tot_ultima["Monto"] = pd.to_numeric(df_tot_ultima["Monto"], errors="coerce")
-    df_tot_ultima = df_tot_ultima.dropna(subset=["Monto"])
+if not df_totales.empty:
+    df_totales["Fecha de Carga"] = pd.to_datetime(df_totales["Fecha de Carga"], errors="coerce")
+    df_totales["Monto"] = pd.to_numeric(df_totales["Monto"], errors="coerce")
+    df_totales = df_totales.dropna(subset=["Fecha de Carga", "Monto"])
 
-    # Toma el MÁS BAJO; si hay empate, el ÚLTIMO registro
+    # 1) Intentar tomar total de la última fecha de carga visible
+    df_tot_ultima = df_totales[df_totales["Fecha de Carga"] == ultima].copy()
+
+    # 2) Si no existe, tomar el ÚLTIMO total disponible en el histórico
+    if df_tot_ultima.empty:
+        fecha_ultimo_total = df_totales["Fecha de Carga"].max()
+        df_tot_ultima = df_totales[df_totales["Fecha de Carga"] == fecha_ultimo_total].copy()
+        st.warning(
+            f"⚠️ La última fecha de carga ({ultima.strftime('%Y-%m-%d')}) no tiene Total. "
+            f"Se muestra el último Total disponible del {fecha_ultimo_total.strftime('%Y-%m-%d')}."
+        )
+
+    # Si hay varios totales ese mismo día: tomar el más bajo; si empata, el último registro
     min_val = df_tot_ultima["Monto"].min()
-    fila_elegida = df_tot_ultima.tail(1)
+    fila_elegida = df_tot_ultima[df_tot_ultima["Monto"] == min_val].tail(1)
 
     monto_tot = float(fila_elegida["Monto"].iloc[0])
     color = "green" if monto_tot >= 0 else "red"
@@ -299,7 +310,7 @@ if not df_tot_ultima.empty:
             unsafe_allow_html=True
         )
 else:
-    st.info("⚠️ No hay registro 'Total' para la última fecha de carga.")
+    st.info("⚠️ No hay ningún registro 'Total' en el histórico.")
 
 
 
