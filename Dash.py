@@ -352,9 +352,16 @@ else:
         .str.replace(' ', '_')
         .str.upper()
     )
-    is_devolucion = np_nombre.isin(['TOTAL', 'PARCIAL'])
+    
+    # ✅ Devolución si el producto marca TOTAL/PARCIAL
+    #    O si el motivo ya viene como DEVOLUCION
+    is_devolucion = (
+        np_nombre.isin(['TOTAL', 'PARCIAL']) |
+        np_motivo.isin(['DEVOLUCION', 'DEVOLUCIÓN'])
+    )
+    
     is_ingreso_extra = np_motivo.isin(['INGRESO_EXTRA', 'INGRESOS_EXTRA'])
-
+    
     df_in.loc[is_devolucion, 'Motivo'] = 'Devolucion'
     df_in.loc[~is_devolucion & is_ingreso_extra, 'Motivo'] = 'Ingreso_extra'
     df_in.loc[~is_devolucion & ~is_ingreso_extra, 'Motivo'] = 'Consignacion cuenta propia'
