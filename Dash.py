@@ -503,11 +503,12 @@ with c2:
 
 
 # 👉 Crear df_eg_extra_cop solo para Maria Moises
+# 👉 Crear df_eg_extra_cop solo para Maria Moises
 df_eg_extra_cop = None
 if sheet_name == "1444 - Maria Moises" and df_cop is not None:
     try:
         # Filtrar solo las columnas necesarias
-        cols_needed = ['Fecha', 'Egreso_extra_COP', 'GMF_4x1000_COP']
+        cols_needed = ['Fecha', 'Descripcion', 'Egreso_extra_COP', 'GMF_4x1000_COP']
         df_eg_extra_cop = df_cop[cols_needed].copy()
 
         # Asegurar tipos
