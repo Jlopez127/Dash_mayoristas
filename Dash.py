@@ -194,9 +194,10 @@ PASSWORDS = {
     "clave_jimmy":       "14856 - Jimmy Cortes",
     "clave_elvis":       "11591 - Paula Herrera",
     "clave_maria":       "1444 - Maria Moises",
+    "clave_maria_antiguo": "Maria Moises 2025",
     "clave_julian":      "13608 - julian sanchez",
     "clave_juan":        "9680 - Juan Felipe Laverde",
-    "clave_cristian":    "14825 - Cristian Javier Castro",   # 👈 NUEVO
+    "clave_cristian":    "14825 - Cristian Javier Castro",
 }
 
 # 4) Pedir clave en el sidebar
@@ -254,11 +255,11 @@ else:
 
 # 👉 Solo si es Maria Moises: cargar la hoja en COP adicional
 df_cop = None
-if sheet_name == "1444 - Maria Moises":
+if sheet_name == "Maria Moises 2025":
     try:
         df_cop = load_data("1444 - Maria Moises COP")
     except Exception as e:
-        st.error(f"⚠️ No se pudo cargar la hoja en COP: {e}")
+        st.error(f"⚠️ No se pudo cargar la hoja en COP histórico: {e}")
         
         
 st.header(f"📋 Conciliaciones: {sheet_name}")
@@ -505,7 +506,7 @@ with c2:
 # 👉 Crear df_eg_extra_cop solo para Maria Moises
 # 👉 Crear df_eg_extra_cop solo para Maria Moises
 df_eg_extra_cop = None
-if sheet_name == "1444 - Maria Moises" and df_cop is not None:
+if sheet_name == "Maria Moises 2025" and df_cop is not None:
     try:
         # Filtrar solo las columnas necesarias
         cols_needed = ['Fecha', 'Descripcion', 'Egreso_extra_COP', 'GMF_4x1000_COP']
