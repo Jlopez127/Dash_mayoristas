@@ -316,6 +316,9 @@ PASSWORDS = {
     "clave_juan":        "9680 - Juan Felipe Laverde",
     "clave_cristian":    "14825 - Cristian Javier Castro",
     "clave_admin":       ADMIN_SHEET,
+    # Usuario de PRUEBAS: replica la vista de Mayra (misma hoja 9444) para probar el
+    # flujo de consignaciones sin usar la clave real de Mayra.
+    "clave_pruebas":     "9444 - Maira Alejandra Paez",
 }
 
 # 4) Pedir clave en el sidebar
