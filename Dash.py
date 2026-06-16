@@ -186,6 +186,120 @@ def load_ingresos_con_id(casillero: str) -> dict[str, pd.DataFrame]:
 
 
 
+# ============== Consignaciones (función nueva para Mayra / casillero 9444) ==============
+# Archivo propio en Dropbox: consignaciones_9444.xlsx (molde de _save_clientes_to_dropbox).
+CONSIG_CASILLERO = "9444"
+CONSIG_SHEET = "Consignaciones"  # nombre de la hoja dentro del xlsx
+CONSIG_COLS = [
+    "ID",                # consecutivo propio: Consignacion1, Consignacion2, ...
+    "Descripcion",       # quién ingresa / concepto -> va a 'Nombre del producto' del histórico
+    "Monto",
+    "Fecha",             # fecha de la consignación (la define el admin)
+    "Numero de cuenta",
+    "Tipo",              # Nomina / Proveedor (clasificación; siempre entra como Ingreso_extra)
+    "Estado",            # pendiente / en revision / aprobada / rechazada
+    "Comprobante",       # ruta en Dropbox del pantallazo que adjunta Mayra
+    "Fecha creacion",    # cuándo la creó el admin
+    "Fecha realizado",   # cuándo Mayra la marcó como realizada
+    "Fecha decision",    # cuándo el admin aprobó/rechazó
+]
+CONSIG_TIPOS = ["Nomina", "Proveedor"]
+CONSIG_ESTADOS = ["pendiente", "en revision", "aprobada", "rechazada"]
+
+
+def _consignaciones_path() -> str:
+    return f"{get_base_folder()}/consignaciones_{CONSIG_CASILLERO}.xlsx"
+
+
+@st.cache_data
+def load_consignaciones() -> pd.DataFrame:
+    """Carga consignaciones_9444.xlsx desde Dropbox. Si no existe aún, DF vacío con columnas."""
+    try:
+        _, res = dbx.files_download(_consignaciones_path())
+        df = pd.read_excel(io.BytesIO(res.content), sheet_name=CONSIG_SHEET)
+    except Exception:
+        df = pd.DataFrame(columns=CONSIG_COLS)
+    # Garantizar todas las columnas esperadas (por si el archivo es viejo)
+    for c in CONSIG_COLS:
+        if c not in df.columns:
+            df[c] = pd.NA
+    return df[CONSIG_COLS]
+
+
+def _save_consignaciones_to_dropbox(df_to_save: pd.DataFrame) -> bool:
+    """Guarda el DF de consignaciones en Dropbox (mismo patrón que _save_clientes_to_dropbox)."""
+    try:
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as w:
+            cols = [c for c in CONSIG_COLS if c in df_to_save.columns]
+            rest = [c for c in df_to_save.columns if c not in cols]
+            df_to_save[cols + rest].to_excel(w, index=False, sheet_name=CONSIG_SHEET)
+        buf.seek(0)
+        dbx.files_upload(
+            buf.read(), _consignaciones_path(), mode=dropbox.files.WriteMode.overwrite
+        )
+        return True
+    except Exception as e:
+        st.error(f"❌ No se pudo guardar el archivo de consignaciones: {e}")
+        return False
+
+
+def _next_consignacion_id(df: pd.DataFrame) -> str:
+    """Siguiente consecutivo 'ConsignacionN' a partir del máximo existente."""
+    if df.empty or "ID" not in df.columns:
+        return "Consignacion1"
+    nums = (
+        df["ID"].astype(str)
+        .str.extract(r"(\d+)\s*$", expand=False)
+        .dropna()
+    )
+    if nums.empty:
+        return "Consignacion1"
+    return f"Consignacion{int(nums.astype(int).max()) + 1}"
+
+
+def _update_consignacion(consig_id: str, updates: dict) -> bool:
+    """Carga, actualiza la fila por ID, y vuelve a guardar en Dropbox."""
+    df = load_consignaciones()
+    mask = df["ID"].astype(str) == str(consig_id)
+    if not mask.any():
+        st.error(f"No se encontró la consignación {consig_id}.")
+        return False
+    for k, v in updates.items():
+        df.loc[mask, k] = v
+    ok = _save_consignaciones_to_dropbox(df)
+    if ok:
+        load_consignaciones.clear()
+    return ok
+
+
+def _comprobantes_folder() -> str:
+    return f"{get_base_folder()}/comprobantes_{CONSIG_CASILLERO}"
+
+
+def _upload_comprobante(consig_id: str, uploaded_file) -> str | None:
+    """Sube el pantallazo a Dropbox y devuelve la ruta guardada."""
+    try:
+        nombre = re.sub(r"[^A-Za-z0-9._-]", "_", str(uploaded_file.name))
+        path = f"{_comprobantes_folder()}/{consig_id}_{nombre}"
+        dbx.files_upload(
+            uploaded_file.getvalue(), path, mode=dropbox.files.WriteMode.overwrite
+        )
+        return path
+    except Exception as e:
+        st.error(f"❌ No se pudo subir el comprobante: {e}")
+        return None
+
+
+def _download_comprobante_bytes(path: str):
+    """Descarga el comprobante para previsualizarlo. Devuelve bytes o None."""
+    try:
+        _, res = dbx.files_download(path)
+        return res.content
+    except Exception:
+        return None
+
+
 # 3) Diccionario de claves por hoja
 # 3) Diccionario de claves por hoja
 # Centinela para el rol ADMIN: no es una hoja real del histórico, solo dispara la vista admin.
@@ -235,11 +349,99 @@ sheet_name = PASSWORDS[password]
 if sheet_name == ADMIN_SHEET:
     st.header("🛠️ Panel de Administración")
     st.caption("Gestión de consignaciones — Mayra (casillero 9444)")
-    st.info(
-        "🚧 Vista admin en construcción.\n\n"
-        "Próximos pasos: crear consignaciones (descripción, monto, fecha, número de cuenta, tipo) "
-        "y revisar comprobantes para aprobar/rechazar."
-    )
+
+    df_consig = load_consignaciones()
+
+    # ---- (A) Crear consignación ----
+    with st.container(border=True):
+        st.markdown("**➕ Crear consignación a Mayra**")
+        ca1, ca2 = st.columns(2)
+        with ca1:
+            new_desc   = st.text_input("Descripción (quién ingresa / concepto)", key="cons_desc")
+            new_monto  = st.number_input("Monto", min_value=0, step=1000, key="cons_monto")
+            new_fecha  = st.date_input("Fecha de la consignación", key="cons_fecha")
+        with ca2:
+            new_cuenta = st.text_input("Número de cuenta", key="cons_cuenta")
+            new_tipo   = st.selectbox("Tipo", CONSIG_TIPOS, key="cons_tipo")
+
+        if st.button("💾 Crear consignación", use_container_width=True):
+            if not str(new_desc).strip() or not new_monto or not str(new_cuenta).strip():
+                st.error("Completa descripción, monto y número de cuenta.")
+            else:
+                nueva = {
+                    "ID":               _next_consignacion_id(df_consig),
+                    "Descripcion":      str(new_desc).strip(),
+                    "Monto":            float(new_monto),
+                    "Fecha":            pd.to_datetime(new_fecha).strftime("%Y-%m-%d"),
+                    "Numero de cuenta": str(new_cuenta).strip(),
+                    "Tipo":             new_tipo,
+                    "Estado":           "pendiente",
+                    "Comprobante":      "",
+                    "Fecha creacion":   pd.Timestamp.now().strftime("%Y-%m-%d"),
+                    "Fecha realizado":  "",
+                    "Fecha decision":   "",
+                }
+                df_new = pd.concat([df_consig, pd.DataFrame([nueva])], ignore_index=True)
+                if _save_consignaciones_to_dropbox(df_new):
+                    load_consignaciones.clear()
+                    st.success(f"✅ Consignación {nueva['ID']} creada (estado: pendiente).")
+                    st.rerun()
+
+    # ---- (B) Tabla de todas las consignaciones ----
+    st.subheader("📋 Consignaciones registradas")
+    if df_consig.empty:
+        st.info("Aún no hay consignaciones registradas.")
+    else:
+        st.dataframe(df_consig, use_container_width=True)
+
+    # ---- (C) Revisar las que Mayra ya marcó como realizadas ----
+    st.subheader("🔎 Pendientes de aprobación")
+    en_rev = df_consig[df_consig["Estado"].astype(str).str.strip().str.lower() == "en revision"]
+    if en_rev.empty:
+        st.caption("No hay consignaciones en revisión.")
+    else:
+        for _, row in en_rev.iterrows():
+            cid = str(row["ID"])
+            with st.container(border=True):
+                st.markdown(
+                    f"**{cid}** — {row['Descripcion']} — "
+                    f"${float(row['Monto']):,.0f} — {row['Tipo']}"
+                )
+                st.caption(
+                    f"Cuenta: {row['Numero de cuenta']} · Fecha: {row['Fecha']} · "
+                    f"Realizada: {row['Fecha realizado']}"
+                )
+                comp = str(row.get("Comprobante") or "").strip()
+                if comp:
+                    img = _download_comprobante_bytes(comp)
+                    if img:
+                        st.image(img, caption="Comprobante", width=320)
+                    else:
+                        st.caption(f"📎 Comprobante: {comp} (no se pudo previsualizar)")
+                else:
+                    st.caption("Sin comprobante adjunto.")
+
+                bc1, bc2 = st.columns(2)
+                if bc1.button("✅ Aprobar", key=f"apr_{cid}", use_container_width=True):
+                    ok = _update_consignacion(cid, {
+                        "Estado": "aprobada",
+                        "Fecha decision": pd.Timestamp.now().strftime("%Y-%m-%d"),
+                    })
+                    # 🚧 PENDIENTE (paso final, desactivado para pruebas):
+                    #     aquí irá el append de la fila Ingreso_extra en la hoja de Mayra.
+                    #     Por ahora SOLO se marca como aprobada; NO se toca historico_mayoristas.xlsx.
+                    if ok:
+                        st.success(f"✅ {cid} aprobada. (Aún NO se suma al histórico — pendiente de activar.)")
+                        st.rerun()
+                if bc2.button("❌ Rechazar", key=f"rec_{cid}", use_container_width=True):
+                    ok = _update_consignacion(cid, {
+                        "Estado": "rechazada",
+                        "Fecha decision": pd.Timestamp.now().strftime("%Y-%m-%d"),
+                    })
+                    if ok:
+                        st.warning(f"❌ {cid} rechazada.")
+                        st.rerun()
+
     st.stop()
 
 df = load_data(sheet_name)
@@ -330,6 +532,52 @@ if not df_totales.empty:
 else:
     st.info("⚠️ No hay ningún registro 'Total' en el histórico.")
 
+
+# 🧾 Sección "Ingresos por consignaciones" — SOLO para Mayra (casillero 9444)
+if sheet_name == "9444 - Maira Alejandra Paez":
+    st.markdown("---")
+    st.header("🧾 Ingresos por consignaciones")
+
+    df_consig_m = load_consignaciones()
+    if df_consig_m.empty:
+        st.info("No tienes consignaciones asignadas todavía.")
+    else:
+        st.dataframe(df_consig_m, use_container_width=True)
+
+        st.subheader("📤 Marcar como realizada y adjuntar comprobante")
+        pend = df_consig_m[df_consig_m["Estado"].astype(str).str.strip().str.lower() == "pendiente"]
+        if pend.empty:
+            st.caption("No tienes consignaciones pendientes por realizar.")
+        else:
+            for _, row in pend.iterrows():
+                cid = str(row["ID"])
+                with st.container(border=True):
+                    st.markdown(
+                        f"**{cid}** — {row['Descripcion']} — "
+                        f"${float(row['Monto']):,.0f} — {row['Tipo']}"
+                    )
+                    st.caption(
+                        f"Cuenta: {row['Numero de cuenta']} · Fecha: {row['Fecha']}"
+                    )
+                    upl = st.file_uploader(
+                        "Adjunta el comprobante (imagen)",
+                        type=["png", "jpg", "jpeg"],
+                        key=f"upl_{cid}",
+                    )
+                    if st.button("✅ Marcar como realizada", key=f"real_{cid}", use_container_width=True):
+                        if upl is None:
+                            st.error("Debes adjuntar el comprobante antes de marcar como realizada.")
+                        else:
+                            ruta = _upload_comprobante(cid, upl)
+                            if ruta:
+                                ok = _update_consignacion(cid, {
+                                    "Estado": "en revision",
+                                    "Comprobante": ruta,
+                                    "Fecha realizado": pd.Timestamp.now().strftime("%Y-%m-%d"),
+                                })
+                                if ok:
+                                    st.success("✅ Marcada como realizada. Queda en revisión del admin.")
+                                    st.rerun()
 
 
 # 7) Filtro por Fecha de Carga
