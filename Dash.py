@@ -188,6 +188,9 @@ def load_ingresos_con_id(casillero: str) -> dict[str, pd.DataFrame]:
 
 # 3) Diccionario de claves por hoja
 # 3) Diccionario de claves por hoja
+# Centinela para el rol ADMIN: no es una hoja real del histórico, solo dispara la vista admin.
+ADMIN_SHEET = "__ADMIN__"
+
 PASSWORDS = {
     "clave_nathalia":    "1633 - Nathalia Ospina",
     "clave_maira":       "9444 - Maira Alejandra Paez",
@@ -198,6 +201,7 @@ PASSWORDS = {
     "clave_julian":      "13608 - julian sanchez",
     "clave_juan":        "9680 - Juan Felipe Laverde",
     "clave_cristian":    "14825 - Cristian Javier Castro",
+    "clave_admin":       ADMIN_SHEET,
 }
 
 # 4) Pedir clave en el sidebar
@@ -225,6 +229,19 @@ if password not in PASSWORDS:
 
 # 📄 Hoja y datos principales
 sheet_name = PASSWORDS[password]
+
+# 🛠️ Rol ADMIN: vista especial. Se renderiza y se corta ANTES del dashboard de mayorista
+#    (el admin no tiene hoja en el histórico, así que nunca debe llegar a load_data).
+if sheet_name == ADMIN_SHEET:
+    st.header("🛠️ Panel de Administración")
+    st.caption("Gestión de consignaciones — Mayra (casillero 9444)")
+    st.info(
+        "🚧 Vista admin en construcción.\n\n"
+        "Próximos pasos: crear consignaciones (descripción, monto, fecha, número de cuenta, tipo) "
+        "y revisar comprobantes para aprobar/rechazar."
+    )
+    st.stop()
+
 df = load_data(sheet_name)
 
 # 🗂️ Mapeo hoja → casillero para cargar IngresosConID en segundo plano
