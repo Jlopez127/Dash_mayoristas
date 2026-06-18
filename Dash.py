@@ -520,6 +520,31 @@ if sheet_name == ADMIN_SHEET:
         cols_vista = [c for c in df_consig.columns if c != "Comprobantes"]
         st.dataframe(df_consig[cols_vista], use_container_width=True)
 
+        # Descargar el comprobante de CUALQUIER consignación (auditar/validar)
+        con_comp = df_consig[df_consig["Comprobantes"].map(lambda x: len(_parse_comprobantes(x)) > 0)]
+        if not con_comp.empty:
+            with st.expander("📥 Ver / descargar comprobantes de cualquier consignación"):
+                for _, r in con_comp.iterrows():
+                    rid = str(r["ID"])
+                    for i, comp in enumerate(_parse_comprobantes(r.get("Comprobantes")), 1):
+                        st.markdown(
+                            f"**{rid}** · comp {i} · ${(_norm_monto(comp.get('monto')) or 0):,.0f} · "
+                            f"cuenta {comp.get('cuenta','')} · ref {comp.get('referencia','')} · {r['Estado']}"
+                        )
+                        img = _download_comprobante_bytes(comp.get("ruta", ""))
+                        if img:
+                            st.image(img, width=260)
+                            fname = (comp.get("ruta", "") or f"{rid}_{i}").split("/")[-1] or f"{rid}_{i}.jpg"
+                            st.download_button(
+                                "⬇️ Descargar",
+                                data=img,
+                                file_name=fname,
+                                mime=("image/png" if fname.lower().endswith(".png") else "image/jpeg"),
+                                key=f"dlall_{rid}_{i}",
+                            )
+                        else:
+                            st.caption("(No se pudo previsualizar este comprobante.)")
+
     # ---- (C) Requieren revisión del admin: pagos parciales o no legibles ----
     st.subheader("🔎 Requieren tu revisión (parciales / no leídas)")
     rev = df_consig[df_consig["Estado"].astype(str).str.strip().str.lower().isin(["parcial", "en revision"])]
@@ -553,6 +578,14 @@ if sheet_name == ADMIN_SHEET:
                     img = _download_comprobante_bytes(comp.get("ruta", ""))
                     if img:
                         st.image(img, width=300)
+                        fname = (comp.get("ruta", "") or f"{cid}_{i}").split("/")[-1] or f"{cid}_{i}.jpg"
+                        st.download_button(
+                            "⬇️ Descargar comprobante",
+                            data=img,
+                            file_name=fname,
+                            mime=("image/png" if fname.lower().endswith(".png") else "image/jpeg"),
+                            key=f"dl_{cid}_{i}",
+                        )
 
                 bc1, bc2 = st.columns(2)
                 if bc1.button("✅ Aprobar", key=f"apr_{cid}", use_container_width=True):
