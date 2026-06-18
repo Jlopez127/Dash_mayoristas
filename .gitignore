@@ -1,0 +1,16 @@
+# Secretos: NUNCA subir a git
+.streamlit/secrets.toml
+*.env
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Datos locales y comprobantes (imágenes sensibles)
+*.xlsx
+*.jpeg
+*.jpg
+*.png

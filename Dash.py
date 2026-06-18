@@ -17,6 +17,8 @@ import re
 import unicodedata
 import pandas as pd
 import math
+import base64
+import json
 
 
 
@@ -32,6 +34,19 @@ dbx = dropbox.Dropbox(
     app_secret=cfg_dbx["app_secret"],
     oauth2_refresh_token=cfg_dbx["refresh_token"],
 )
+
+# 2.1) Inicializa cliente de Anthropic (Claude) para leer comprobantes con visión.
+#      Si no hay API key configurada, anthropic_client queda en None y el flujo
+#      cae a revisión manual del admin (no rompe la app).
+try:
+    import anthropic
+    _anthropic_key = st.secrets.get("anthropic", {}).get("api_key", "").strip()
+    if _anthropic_key and _anthropic_key != "PEGA_AQUI_TU_API_KEY":
+        anthropic_client = anthropic.Anthropic(api_key=_anthropic_key)
+    else:
+        anthropic_client = None
+except Exception:
+    anthropic_client = None
 
 
 def get_base_folder() -> str:
@@ -197,14 +212,16 @@ CONSIG_COLS = [
     "Fecha",             # fecha de la consignación (la define el admin)
     "Numero de cuenta",
     "Tipo",              # Nomina / Proveedor (clasificación; siempre entra como Ingreso_extra)
-    "Estado",            # pendiente / en revision / aprobada / rechazada
-    "Comprobante",       # ruta en Dropbox del pantallazo que adjunta Mayra
+    "Estado",            # pendiente / parcial / en revision / aprobada / rechazada
     "Fecha creacion",    # cuándo la creó el admin
-    "Fecha realizado",   # cuándo Mayra la marcó como realizada
-    "Fecha decision",    # cuándo el admin aprobó/rechazó
+    "Fecha realizado",   # primera vez que Mayra adjuntó comprobante
+    "Fecha decision",    # cuándo se aprobó/rechazó
+    # --- Pagos: una consignación puede tener VARIOS comprobantes que se suman ---
+    "Comprobantes",      # JSON: lista de {ruta, banco, monto, fecha, cuenta, referencia}
+    "Monto abonado",     # suma de los montos de los comprobantes adjuntados
 ]
 CONSIG_TIPOS = ["Nomina", "Proveedor"]
-CONSIG_ESTADOS = ["pendiente", "en revision", "aprobada", "rechazada"]
+CONSIG_ESTADOS = ["pendiente", "parcial", "en revision", "aprobada", "rechazada"]
 
 
 def _consignaciones_path() -> str:
@@ -300,6 +317,110 @@ def _download_comprobante_bytes(path: str):
         return None
 
 
+# --- Lectura del comprobante con Claude (Haiku 4.5, visión) ---
+_COMPROBANTE_PROMPT = (
+    "Este es un comprobante de transferencia/consignación bancaria. "
+    "Devuelve ÚNICAMENTE un objeto JSON válido (sin texto extra, sin markdown) "
+    "con estas claves exactas:\n"
+    '{"banco": "<nombre del banco/entidad>", '
+    '"monto": <número del monto, solo dígitos sin símbolos ni puntos de miles>, '
+    '"fecha": "<fecha tal como aparece>", '
+    '"cuenta_destino": "<NÚMERO de cuenta o de celular de destino COMPLETO, solo dígitos; si viene en segmentos separados por guiones o espacios (p.ej. 616-184510-29) úne todos los segmentos en un solo número (61618451029); NO el nombre del beneficiario>", '
+    '"referencia": "<número de referencia/aprobación/comprobante; el identificador único del movimiento>", '
+    '"es_transferencia_exitosa": <true o false>}\n'
+    "Si un dato no aparece, usa cadena vacía (o 0 para el monto)."
+)
+
+
+def _parse_json_laxo(texto: str):
+    """Parsea JSON aunque venga con ```fences``` o texto alrededor."""
+    t = texto.strip()
+    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", t, flags=re.IGNORECASE).strip()
+    try:
+        return json.loads(t)
+    except Exception:
+        m = re.search(r"\{.*\}", t, flags=re.DOTALL)
+        if m:
+            return json.loads(m.group(0))
+        raise
+
+
+def _extraer_datos_comprobante(image_bytes: bytes, media_type: str):
+    """Lee el comprobante con Claude Haiku 4.5. Devuelve (datos_dict, error_str)."""
+    if anthropic_client is None:
+        return None, "Cliente de IA no configurado (falta API key de Anthropic)."
+    try:
+        b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+        resp = anthropic_client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=1024,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": media_type, "data": b64},
+                    },
+                    {"type": "text", "text": _COMPROBANTE_PROMPT},
+                ],
+            }],
+        )
+        texto = next((b.text for b in resp.content if b.type == "text"), None)
+        if not texto:
+            return None, "El modelo no devolvió datos."
+        return _parse_json_laxo(texto), None
+    except Exception as e:
+        return None, str(e)
+
+
+def _parse_comprobantes(cell) -> list:
+    """Lee la celda JSON 'Comprobantes' y devuelve la lista (o [] si vacía/ inválida)."""
+    try:
+        if cell is None or (isinstance(cell, float) and pd.isna(cell)):
+            return []
+    except Exception:
+        pass
+    s = str(cell).strip()
+    if not s or s.lower() == "nan":
+        return []
+    try:
+        v = json.loads(s)
+        return v if isinstance(v, list) else []
+    except Exception:
+        return []
+
+
+def _norm_cta(x) -> str:
+    return re.sub(r"\D", "", str(x or ""))  # solo dígitos: "616-184510-29" -> "61618451029"
+
+
+def _norm_txt(x) -> str:
+    return re.sub(r"\s+", "", str(x or "")).lower()
+
+
+def _norm_monto(x):
+    try:
+        return round(float(x), 2)
+    except Exception:
+        return None
+
+
+def _es_duplicado_global(df: pd.DataFrame, cuenta, referencia, monto, fecha) -> bool:
+    """True si YA existe (en cualquier consignación) un comprobante con la MISMA
+    cuenta + referencia + monto + fecha."""
+    cta, ref, fch, mto = _norm_cta(cuenta), _norm_txt(referencia), _norm_txt(fecha), _norm_monto(monto)
+    if not ref or mto is None or "Comprobantes" not in df.columns:
+        return False
+    for _, row in df.iterrows():
+        for comp in _parse_comprobantes(row.get("Comprobantes")):
+            if (_norm_cta(comp.get("cuenta")) == cta
+                    and _norm_txt(comp.get("referencia")) == ref
+                    and _norm_txt(comp.get("fecha")) == fch
+                    and _norm_monto(comp.get("monto")) == mto):
+                return True
+    return False
+
+
 # 3) Diccionario de claves por hoja
 # 3) Diccionario de claves por hoja
 # Centinela para el rol ADMIN: no es una hoja real del histórico, solo dispara la vista admin.
@@ -379,10 +500,11 @@ if sheet_name == ADMIN_SHEET:
                     "Numero de cuenta": str(new_cuenta).strip(),
                     "Tipo":             new_tipo,
                     "Estado":           "pendiente",
-                    "Comprobante":      "",
                     "Fecha creacion":   pd.Timestamp.now().strftime("%Y-%m-%d"),
                     "Fecha realizado":  "",
                     "Fecha decision":   "",
+                    "Comprobantes":     "[]",
+                    "Monto abonado":    0,
                 }
                 df_new = pd.concat([df_consig, pd.DataFrame([nueva])], ignore_index=True)
                 if _save_consignaciones_to_dropbox(df_new):
@@ -390,39 +512,47 @@ if sheet_name == ADMIN_SHEET:
                     st.success(f"✅ Consignación {nueva['ID']} creada (estado: pendiente).")
                     st.rerun()
 
-    # ---- (B) Tabla de todas las consignaciones ----
+    # ---- (B) Tabla de todas las consignaciones (sin la columna JSON cruda) ----
     st.subheader("📋 Consignaciones registradas")
     if df_consig.empty:
         st.info("Aún no hay consignaciones registradas.")
     else:
-        st.dataframe(df_consig, use_container_width=True)
+        cols_vista = [c for c in df_consig.columns if c != "Comprobantes"]
+        st.dataframe(df_consig[cols_vista], use_container_width=True)
 
-    # ---- (C) Revisar las que Mayra ya marcó como realizadas ----
-    st.subheader("🔎 Pendientes de aprobación")
-    en_rev = df_consig[df_consig["Estado"].astype(str).str.strip().str.lower() == "en revision"]
-    if en_rev.empty:
-        st.caption("No hay consignaciones en revisión.")
+    # ---- (C) Requieren revisión del admin: pagos parciales o no legibles ----
+    st.subheader("🔎 Requieren tu revisión (parciales / no leídas)")
+    rev = df_consig[df_consig["Estado"].astype(str).str.strip().str.lower().isin(["parcial", "en revision"])]
+    if rev.empty:
+        st.caption("Nada pendiente de revisión (lo demás se aprobó/rechazó automáticamente).")
     else:
-        for _, row in en_rev.iterrows():
+        for _, row in rev.iterrows():
             cid = str(row["ID"])
+            estado = str(row["Estado"])
+            solicitado = float(pd.to_numeric(row["Monto"], errors="coerce") or 0)
+            comps = _parse_comprobantes(row.get("Comprobantes"))
+            abonado = sum(_norm_monto(c.get("monto")) or 0 for c in comps)
             with st.container(border=True):
                 st.markdown(
-                    f"**{cid}** — {row['Descripcion']} — "
-                    f"${float(row['Monto']):,.0f} — {row['Tipo']}"
+                    f"**{cid}** — {row['Descripcion']} — solicitado ${solicitado:,.0f} — "
+                    f"{row['Tipo']} — `{estado}`"
                 )
                 st.caption(
-                    f"Cuenta: {row['Numero de cuenta']} · Fecha: {row['Fecha']} · "
-                    f"Realizada: {row['Fecha realizado']}"
+                    f"Cuenta solicitada: {row['Numero de cuenta']} · "
+                    f"Abonado: ${abonado:,.0f} · Faltante: ${max(solicitado - abonado, 0):,.0f}"
                 )
-                comp = str(row.get("Comprobante") or "").strip()
-                if comp:
-                    img = _download_comprobante_bytes(comp)
+                if not comps:
+                    st.caption("Sin comprobantes legibles.")
+                for i, comp in enumerate(comps, 1):
+                    st.markdown(
+                        f"Comprobante {i}: banco {comp.get('banco','')} · "
+                        f"monto ${(_norm_monto(comp.get('monto')) or 0):,.0f} · "
+                        f"cuenta {comp.get('cuenta','')} · ref {comp.get('referencia','')} · "
+                        f"fecha {comp.get('fecha','')}"
+                    )
+                    img = _download_comprobante_bytes(comp.get("ruta", ""))
                     if img:
-                        st.image(img, caption="Comprobante", width=320)
-                    else:
-                        st.caption(f"📎 Comprobante: {comp} (no se pudo previsualizar)")
-                else:
-                    st.caption("Sin comprobante adjunto.")
+                        st.image(img, width=300)
 
                 bc1, bc2 = st.columns(2)
                 if bc1.button("✅ Aprobar", key=f"apr_{cid}", use_container_width=True):
@@ -432,7 +562,6 @@ if sheet_name == ADMIN_SHEET:
                     })
                     # 🚧 PENDIENTE (paso final, desactivado para pruebas):
                     #     aquí irá el append de la fila Ingreso_extra en la hoja de Mayra.
-                    #     Por ahora SOLO se marca como aprobada; NO se toca historico_mayoristas.xlsx.
                     if ok:
                         st.success(f"✅ {cid} aprobada. (Aún NO se suma al histórico — pendiente de activar.)")
                         st.rerun()
@@ -545,42 +674,117 @@ if sheet_name == "9444 - Maira Alejandra Paez":
     if df_consig_m.empty:
         st.info("No tienes consignaciones asignadas todavía.")
     else:
-        st.dataframe(df_consig_m, use_container_width=True)
+        cols_vista = [c for c in df_consig_m.columns if c != "Comprobantes"]
+        st.dataframe(df_consig_m[cols_vista], use_container_width=True)
 
-        st.subheader("📤 Marcar como realizada y adjuntar comprobante")
-        pend = df_consig_m[df_consig_m["Estado"].astype(str).str.strip().str.lower() == "pendiente"]
-        if pend.empty:
-            st.caption("No tienes consignaciones pendientes por realizar.")
+        st.subheader("📤 Subir comprobante")
+        st.caption(
+            "Se valida que la cuenta del comprobante sea la solicitada y que no esté repetido. "
+            "Si el monto no alcanza, puedes adjuntar otro y se suman; al cubrir el total se aprueba sola."
+        )
+        abiertas = df_consig_m[
+            df_consig_m["Estado"].astype(str).str.strip().str.lower().isin(["pendiente", "parcial"])
+        ]
+        if abiertas.empty:
+            st.caption("No tienes consignaciones por pagar.")
         else:
-            for _, row in pend.iterrows():
+            for _, row in abiertas.iterrows():
                 cid = str(row["ID"])
+                solicitado = float(pd.to_numeric(row["Monto"], errors="coerce") or 0)
+                cuenta_sol = str(row["Numero de cuenta"])
+                comps = _parse_comprobantes(row.get("Comprobantes"))
+                abonado = sum(_norm_monto(c.get("monto")) or 0 for c in comps)
+                falta = max(solicitado - abonado, 0)
                 with st.container(border=True):
                     st.markdown(
-                        f"**{cid}** — {row['Descripcion']} — "
-                        f"${float(row['Monto']):,.0f} — {row['Tipo']}"
+                        f"**{cid}** — {row['Descripcion']} — solicitado ${solicitado:,.0f} — "
+                        f"cuenta {cuenta_sol} — {row['Tipo']}"
                     )
-                    st.caption(
-                        f"Cuenta: {row['Numero de cuenta']} · Fecha: {row['Fecha']}"
-                    )
+                    if comps:
+                        st.caption(
+                            f"Abonado: ${abonado:,.0f} · Faltante: ${falta:,.0f} · "
+                            f"Comprobantes adjuntados: {len(comps)}"
+                        )
+                        if falta > 0:
+                            st.warning(f"💸 Pago parcial: te falta ${falta:,.0f}. Adjunta otro comprobante para completar.")
+
                     upl = st.file_uploader(
-                        "Adjunta el comprobante (imagen)",
+                        "Adjunta comprobante (imagen)",
                         type=["png", "jpg", "jpeg"],
                         key=f"upl_{cid}",
                     )
-                    if st.button("✅ Marcar como realizada", key=f"real_{cid}", use_container_width=True):
+                    if st.button("✅ Adjuntar comprobante", key=f"real_{cid}", use_container_width=True):
                         if upl is None:
-                            st.error("Debes adjuntar el comprobante antes de marcar como realizada.")
+                            st.error("Debes adjuntar una imagen.")
                         else:
+                            hoy = pd.Timestamp.now().strftime("%Y-%m-%d")
+                            fr_actual = str(row.get("Fecha realizado") or "").strip()
+                            primera = (not fr_actual or fr_actual.lower() == "nan")
+                            image_bytes = upl.getvalue()
+                            media_type = upl.type or "image/png"
                             ruta = _upload_comprobante(cid, upl)
                             if ruta:
-                                ok = _update_consignacion(cid, {
-                                    "Estado": "en revision",
-                                    "Comprobante": ruta,
-                                    "Fecha realizado": pd.Timestamp.now().strftime("%Y-%m-%d"),
-                                })
-                                if ok:
-                                    st.success("✅ Marcada como realizada. Queda en revisión del admin.")
-                                    st.rerun()
+                                datos, err = _extraer_datos_comprobante(image_bytes, media_type)
+
+                                if datos is None:
+                                    # La IA no pudo leer -> revisión manual del admin
+                                    upd = {"Estado": "en revision"}
+                                    if primera:
+                                        upd["Fecha realizado"] = hoy
+                                    if _update_consignacion(cid, upd):
+                                        st.warning(f"📎 No se pudo leer el comprobante ({err}). Queda en revisión del admin.")
+                                        st.rerun()
+                                else:
+                                    cta_comp = datos.get("cuenta_destino", "")
+                                    cuenta_ok = (_norm_cta(cuenta_sol) == "" or _norm_cta(cta_comp) == _norm_cta(cuenta_sol))
+
+                                    if not datos.get("es_transferencia_exitosa", True):
+                                        st.error("⛔ El comprobante no indica una transferencia exitosa. No se agregó.")
+                                    elif not cuenta_ok:
+                                        st.error(
+                                            f"⛔ La cuenta del comprobante ({cta_comp}) NO coincide con la cuenta "
+                                            f"solicitada ({cuenta_sol}). No se agregó."
+                                        )
+                                    elif _es_duplicado_global(load_consignaciones(), cta_comp, datos.get("referencia"), datos.get("monto"), datos.get("fecha")):
+                                        st.error(
+                                            f"⚠️ Comprobante DUPLICADO (cuenta {cta_comp}, ref {datos.get('referencia')}, "
+                                            f"monto {datos.get('monto')}, fecha {datos.get('fecha')}). No se agregó."
+                                        )
+                                    else:
+                                        comp_nuevo = {
+                                            "ruta": ruta,
+                                            "banco": datos.get("banco", ""),
+                                            "monto": _norm_monto(datos.get("monto")) or 0,
+                                            "fecha": datos.get("fecha", ""),
+                                            "cuenta": cta_comp,
+                                            "referencia": datos.get("referencia", ""),
+                                        }
+                                        comps_new = comps + [comp_nuevo]
+                                        abonado_new = sum(_norm_monto(c.get("monto")) or 0 for c in comps_new)
+                                        upd = {
+                                            "Comprobantes": json.dumps(comps_new, ensure_ascii=False),
+                                            "Monto abonado": abonado_new,
+                                        }
+                                        if primera:
+                                            upd["Fecha realizado"] = hoy
+
+                                        if solicitado > 0 and abonado_new >= solicitado:
+                                            # Cubre el total -> aprobación automática (sin tocar el histórico)
+                                            upd["Estado"] = "aprobada"
+                                            upd["Fecha decision"] = hoy
+                                            if _update_consignacion(cid, upd):
+                                                st.success(f"✅ Pago COMPLETO (${abonado_new:,.0f}). Aprobado automáticamente.")
+                                                st.rerun()
+                                        else:
+                                            # Falta dinero -> pago parcial; el admin debe verlo si no completa
+                                            upd["Estado"] = "parcial"
+                                            if _update_consignacion(cid, upd):
+                                                falta_new = max(solicitado - abonado_new, 0)
+                                                st.warning(
+                                                    f"💸 Abonado ${abonado_new:,.0f} de ${solicitado:,.0f}. "
+                                                    f"Te falta ${falta_new:,.0f}. ¿Adjuntas otro comprobante para completar?"
+                                                )
+                                                st.rerun()
 
 
 # 7) Filtro por Fecha de Carga
