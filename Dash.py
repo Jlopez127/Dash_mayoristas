@@ -959,15 +959,19 @@ if cas_consig:
         vista = retiros_mios[["ID retiro", "Descripcion", "Monto", "Comision %", "Egreso retiro", "Estado", "_recibe"]].copy()
         vista = vista.rename(columns={"_recibe": "Cobra (casillero)"})
         st.dataframe(vista, use_container_width=True)
-        total = pd.to_numeric(retiros_mios["Egreso retiro"], errors="coerce").fillna(0).sum()
-        aprob = pd.to_numeric(
-            retiros_mios.loc[
-                retiros_mios["Estado"].astype(str).str.strip().str.lower() == "aprobada", "Egreso retiro"
-            ], errors="coerce").fillna(0).sum()
+
+        eg = pd.to_numeric(retiros_mios["Egreso retiro"], errors="coerce").fillna(0)
+        est = retiros_mios["Estado"].astype(str).str.strip().str.lower()
+        # El egreso SOLO cuenta cuando el comprobante del retiro está APROBADO.
+        egreso_confirmado = eg[est == "aprobada"].sum()
+        egreso_pendiente = eg[est.isin(["pendiente", "parcial", "en revision"])].sum()
         c1, c2 = st.columns(2)
-        c1.metric("Total egresos por retiros", f"${total:,.0f}")
-        c2.metric("Egresos de retiros aprobados", f"${aprob:,.0f}")
-        st.caption("🚧 El egreso aún NO se escribe en el histórico (pendiente de activar).")
+        c1.metric("Egresos confirmados (comprobante aprobado)", f"${egreso_confirmado:,.0f}")
+        c2.metric("Pendientes por aprobar", f"${egreso_pendiente:,.0f}")
+        st.caption(
+            "El egreso se suma cuando el comprobante del retiro queda APROBADO (no al crearlo). "
+            "🚧 El append al histórico sigue desactivado."
+        )
 
 
 # 7) Filtro por Fecha de Carga
