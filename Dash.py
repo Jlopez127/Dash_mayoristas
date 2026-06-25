@@ -213,6 +213,16 @@ CASILLEROS = {
     "9680":  "Juan Felipe Laverde",
     "13608": "julian sanchez",
     "14825": "Cristian Javier Castro",
+    # Casilleros de PRUEBA aislados (no son mayoristas reales; solo para testear sin tocar lo real)
+    "PRUEBA-9444": "🧪 PRUEBAS (vista Mayra)",
+    "PRUEBA-1444": "🧪 PRUEBAS (vista Maria)",
+}
+
+# Override: qué casillero de CONSIGNACIONES usa cada clave (para aislar pruebas del real).
+# Los usuarios de prueba escriben en archivos separados, sin afectar a los mayoristas reales.
+CONSIG_CASILLERO_OVERRIDE = {
+    "clave_pruebas":  "PRUEBA-9444",
+    "clave_pruebas2": "PRUEBA-1444",
 }
 CONSIG_SHEET = "Consignaciones"  # nombre de la hoja dentro del xlsx
 CONSIG_COLS = [
@@ -740,6 +750,9 @@ SHEET_TO_CAS = {
 
 casillero_actual = SHEET_TO_CAS.get(sheet_name)
 
+# Casillero para CONSIGNACIONES/RETIROS: por defecto el real, salvo usuarios de prueba (aislados).
+cas_consig = CONSIG_CASILLERO_OVERRIDE.get(password, casillero_actual)
+
 # 🚚 Carga silenciosa de IngresosConID a sesión (sin renderizar)
 if casillero_actual:
     loaded = load_ingresos_con_id(casillero_actual)  # puede venir cacheado
@@ -814,11 +827,11 @@ else:
 
 
 # 🧾 Sección "Ingresos por consignaciones" — para cualquier mayorista (su propio casillero)
-if casillero_actual:
+if cas_consig:
     st.markdown("---")
     st.header("🧾 Ingresos por consignaciones")
 
-    df_consig_m = load_consignaciones(casillero_actual)
+    df_consig_m = load_consignaciones(cas_consig)
     if df_consig_m.empty:
         st.info("No tienes consignaciones asignadas todavía.")
     else:
@@ -870,7 +883,7 @@ if casillero_actual:
                             primera = (not fr_actual or fr_actual.lower() == "nan")
                             image_bytes = upl.getvalue()
                             media_type = upl.type or "image/png"
-                            ruta = _upload_comprobante(casillero_actual, cid, upl)
+                            ruta = _upload_comprobante(cas_consig, cid, upl)
                             if ruta:
                                 datos, err = _extraer_datos_comprobante(image_bytes, media_type)
 
@@ -879,7 +892,7 @@ if casillero_actual:
                                     upd = {"Estado": "en revision"}
                                     if primera:
                                         upd["Fecha realizado"] = hoy
-                                    if _update_consignacion(casillero_actual, cid, upd):
+                                    if _update_consignacion(cas_consig, cid, upd):
                                         st.warning(f"📎 No se pudo leer el comprobante ({err}). Queda en revisión del admin.")
                                         st.rerun()
                                 else:
@@ -893,7 +906,7 @@ if casillero_actual:
                                             f"⛔ La cuenta del comprobante ({cta_comp}) NO coincide con la cuenta "
                                             f"solicitada ({cuenta_sol}). No se agregó."
                                         )
-                                    elif _es_duplicado_global(load_consignaciones(casillero_actual), cta_comp, datos.get("referencia"), datos.get("monto"), datos.get("fecha")):
+                                    elif _es_duplicado_global(load_consignaciones(cas_consig), cta_comp, datos.get("referencia"), datos.get("monto"), datos.get("fecha")):
                                         st.error(
                                             f"⚠️ Comprobante DUPLICADO (cuenta {cta_comp}, ref {datos.get('referencia')}, "
                                             f"monto {datos.get('monto')}, fecha {datos.get('fecha')}). No se agregó."
@@ -920,13 +933,13 @@ if casillero_actual:
                                             # Cubre el total -> aprobación automática (sin tocar el histórico)
                                             upd["Estado"] = "aprobada"
                                             upd["Fecha decision"] = hoy
-                                            if _update_consignacion(casillero_actual, cid, upd):
+                                            if _update_consignacion(cas_consig, cid, upd):
                                                 st.success(f"✅ Pago COMPLETO (${abonado_new:,.0f}). Aprobado automáticamente.")
                                                 st.rerun()
                                         else:
                                             # Falta dinero -> pago parcial; el admin debe verlo si no completa
                                             upd["Estado"] = "parcial"
-                                            if _update_consignacion(casillero_actual, cid, upd):
+                                            if _update_consignacion(cas_consig, cid, upd):
                                                 falta_new = max(solicitado - abonado_new, 0)
                                                 st.warning(
                                                     f"💸 Abonado ${abonado_new:,.0f} de ${solicitado:,.0f}. "
@@ -936,10 +949,10 @@ if casillero_actual:
 
 
 # 🏧 Sección "Mis retiros (egresos)" — lo que ESTE mayorista retira (se le carga como egreso)
-if casillero_actual:
+if cas_consig:
     st.markdown("---")
     st.header("🏧 Mis retiros (egresos)")
-    retiros_mios = _retiros_de(casillero_actual)
+    retiros_mios = _retiros_de(cas_consig)
     if retiros_mios.empty:
         st.info("No tienes retiros registrados.")
     else:
