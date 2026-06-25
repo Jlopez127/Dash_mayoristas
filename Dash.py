@@ -893,24 +893,19 @@ if cas_consig:
                                     if primera:
                                         upd["Fecha realizado"] = hoy
                                     if _update_consignacion(cas_consig, cid, upd):
-                                        st.warning(f"📎 No se pudo leer el comprobante ({err}). Queda en revisión del admin.")
+                                        st.warning("📎 No se pudo procesar el comprobante automáticamente. Quedó en revisión del administrador.")
                                         st.rerun()
                                 else:
                                     cta_comp = datos.get("cuenta_destino", "")
                                     cuenta_ok = (_norm_cta(cuenta_sol) == "" or _norm_cta(cta_comp) == _norm_cta(cuenta_sol))
-
+                                    # Mensajes genéricos al mayorista: NO se exponen las reglas internas
+                                    # (cuenta esperada, montos, referencias). El admin sí ve el detalle.
                                     if not datos.get("es_transferencia_exitosa", True):
-                                        st.error("⛔ El comprobante no indica una transferencia exitosa. No se agregó.")
+                                        st.error("No se pudo registrar este comprobante. Verifica que sea correcto o contacta al administrador.")
                                     elif not cuenta_ok:
-                                        st.error(
-                                            f"⛔ La cuenta del comprobante ({cta_comp}) NO coincide con la cuenta "
-                                            f"solicitada ({cuenta_sol}). No se agregó."
-                                        )
+                                        st.error("No se pudo registrar este comprobante. Verifica que sea correcto o contacta al administrador.")
                                     elif _es_duplicado_global(load_consignaciones(cas_consig), cta_comp, datos.get("referencia"), datos.get("monto"), datos.get("fecha")):
-                                        st.error(
-                                            f"⚠️ Comprobante DUPLICADO (cuenta {cta_comp}, ref {datos.get('referencia')}, "
-                                            f"monto {datos.get('monto')}, fecha {datos.get('fecha')}). No se agregó."
-                                        )
+                                        st.error("⚠️ Este comprobante ya fue usado anteriormente. No se puede registrar de nuevo.")
                                     else:
                                         comp_nuevo = {
                                             "ruta": ruta,
