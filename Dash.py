@@ -333,6 +333,31 @@ def _retiros_de(casillero_retira: str) -> pd.DataFrame:
     return allr[allr["Mayorista retira"].astype(str).str.strip() == str(casillero_retira)].copy()
 
 
+def _pendientes_saldo(casillero: str, df_hist: pd.DataFrame):
+    """Saldo en vivo: suma de consignaciones/retiros APROBADOS que AÚN no están en el
+    histórico (detectados por 'Orden'). Devuelve (ingresos_pendientes, egresos_pendientes).
+    Cuando el generador ya los cargó (Orden presente en el histórico), dejan de contar
+    -> no se duplican."""
+    ordenes = set()
+    if df_hist is not None and "Orden" in df_hist.columns:
+        ordenes = set(df_hist["Orden"].astype(str).str.strip())
+    ing = 0.0
+    egr = 0.0
+    dcons = load_consignaciones(casillero)
+    if dcons is not None and not dcons.empty:
+        ap = dcons[dcons["Estado"].astype(str).str.strip().str.lower() == "aprobada"]
+        for _, r in ap.iterrows():
+            if str(r.get("ID", "")).strip() not in ordenes:
+                ing += _norm_monto(r.get("Monto")) or 0
+    dret = _retiros_de(casillero)
+    if dret is not None and not dret.empty:
+        apr = dret[dret["Estado"].astype(str).str.strip().str.lower() == "aprobada"]
+        for _, r in apr.iterrows():
+            if str(r.get("ID retiro", "")).strip() not in ordenes:
+                egr += _norm_monto(r.get("Egreso retiro")) or 0
+    return ing, egr
+
+
 def _update_consignacion(casillero: str, consig_id: str, updates: dict) -> bool:
     """Carga, actualiza la fila por ID, y vuelve a guardar en Dropbox."""
     df = load_consignaciones(casillero)
@@ -808,22 +833,32 @@ if not df_totales.empty:
     # Si hay varios totales ese mismo día: tomar el más bajo; si empata, el último registro
     min_val = df_tot_ultima["Monto"].min()
     fila_elegida = df_tot_ultima[df_tot_ultima["Monto"] == min_val].tail(1)
-
-    monto_tot = float(fila_elegida["Monto"].iloc[0])
-    color = "green" if monto_tot >= 0 else "red"
-
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        st.markdown(
-            f"""
-            <div style="text-align:center; font-size:3rem; font-weight:bold; color:{color};">
-              1️⃣ ${monto_tot:,.0f}
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+    base_tot = float(fila_elegida["Monto"].iloc[0])
 else:
-    st.info("⚠️ No hay ningún registro 'Total' en el histórico.")
+    base_tot = 0.0
+    st.info("⚠️ No hay 'Total' en el histórico; el saldo en vivo parte de 0 + consignaciones aprobadas.")
+
+# 💡 SALDO EN VIVO: total oficial + consignaciones/retiros APROBADOS aún no cargados al histórico.
+#    Cuando el generador los carga (Orden presente en el histórico) dejan de contar -> no se duplica.
+ping, pegr = _pendientes_saldo(cas_consig, df) if cas_consig else (0.0, 0.0)
+saldo_vivo = base_tot + ping - pegr
+color = "green" if saldo_vivo >= 0 else "red"
+
+col1, col2, col3 = st.columns([1, 2, 1])
+with col2:
+    st.markdown(
+        f"""
+        <div style="text-align:center; font-size:3rem; font-weight:bold; color:{color};">
+          1️⃣ ${saldo_vivo:,.0f}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+if ping or pegr:
+    st.caption(
+        f"En vivo: incluye +${ping:,.0f} de consignaciones aprobadas y −${pegr:,.0f} de retiros "
+        f"aún no cargados al histórico. (Total oficial cargado: ${base_tot:,.0f}.)"
+    )
 
 
 # 🧾 Sección "Ingresos por consignaciones" — para cualquier mayorista (su propio casillero)
