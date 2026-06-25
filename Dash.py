@@ -229,6 +229,11 @@ CONSIG_COLS = [
     # --- Pagos: una consignación puede tener VARIOS comprobantes que se suman ---
     "Comprobantes",      # JSON: lista de {ruta, banco, monto, fecha, cuenta, referencia}
     "Monto abonado",     # suma de los montos de los comprobantes adjuntados
+    # --- Retiro: si esta consignación es un retiro de OTRO mayorista (A) ---
+    "Mayorista retira",  # casillero A que retira (vacío si es consignación normal)
+    "Comision %",        # comisión del retiro (porcentaje)
+    "ID retiro",         # consecutivo por A: retiro1, retiro2, ...
+    "Egreso retiro",     # monto + comisión -> egreso que se carga a A
 ]
 CONSIG_TIPOS = ["Nomina", "Proveedor"]
 CONSIG_ESTADOS = ["pendiente", "parcial", "en revision", "aprobada", "rechazada"]
@@ -283,6 +288,39 @@ def _next_consignacion_id(df: pd.DataFrame) -> str:
     if nums.empty:
         return "Consignacion1"
     return f"Consignacion{int(nums.astype(int).max()) + 1}"
+
+
+def _all_retiros() -> pd.DataFrame:
+    """Junta los retiros (consignaciones con 'Mayorista retira') de TODOS los casilleros."""
+    frames = []
+    for cas in CASILLEROS:
+        df = load_consignaciones(cas)
+        if "Mayorista retira" not in df.columns:
+            continue
+        col = df["Mayorista retira"].astype(str).str.strip()
+        r = df[~col.isin(["", "nan", "None"]) & df["Mayorista retira"].notna()].copy()
+        if not r.empty:
+            r["_recibe"] = cas
+            frames.append(r)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def _next_retiro_id(casillero_retira: str) -> str:
+    """Consecutivo 'retiroN' por mayorista que retira (A)."""
+    allr = _all_retiros()
+    if allr.empty:
+        return "retiro1"
+    mine = allr[allr["Mayorista retira"].astype(str).str.strip() == str(casillero_retira)]
+    nums = mine["ID retiro"].astype(str).str.extract(r"(\d+)\s*$", expand=False).dropna()
+    return f"retiro{int(nums.astype(int).max()) + 1}" if not nums.empty else "retiro1"
+
+
+def _retiros_de(casillero_retira: str) -> pd.DataFrame:
+    """Retiros donde este mayorista es el que RETIRA (A)."""
+    allr = _all_retiros()
+    if allr.empty:
+        return allr
+    return allr[allr["Mayorista retira"].astype(str).str.strip() == str(casillero_retira)].copy()
 
 
 def _update_consignacion(casillero: str, consig_id: str, updates: dict) -> bool:
@@ -450,6 +488,8 @@ PASSWORDS = {
     # Usuario de PRUEBAS: replica la vista de Mayra (misma hoja 9444) para probar el
     # flujo de consignaciones sin usar la clave real de Mayra.
     "clave_pruebas":     "9444 - Maira Alejandra Paez",
+    # 2º usuario de PRUEBAS: hoja 1444 (Maria) para probar el lado del que RETIRA (egreso).
+    "clave_pruebas2":    "1444 - Maria Moises",
 }
 
 # 4) Pedir clave en el sidebar
@@ -528,6 +568,63 @@ if sheet_name == ADMIN_SHEET:
                 if _save_consignaciones_to_dropbox(df_new, cas_sel):
                     load_consignaciones.clear()
                     st.success(f"✅ Consignación {nueva['ID']} creada para {CASILLEROS[cas_sel]} (estado: pendiente).")
+                    st.rerun()
+
+    # ---- (A2) Crear RETIRO: A retira; B le cobra/recibe (le entra como consignación) ----
+    with st.container(border=True):
+        st.markdown("**🏧 Crear retiro** — B recibe/cobra; a A se le carga el egreso (monto + comisión)")
+        cr1, cr2 = st.columns(2)
+        with cr1:
+            ret_b = st.selectbox("Mayorista que RECIBE / cobra (B)", list(CASILLEROS.keys()),
+                                 format_func=lambda c: f"{CASILLEROS[c]} ({c})", key="ret_b")
+            ret_monto = st.number_input("Monto del retiro", min_value=0, step=1000, key="ret_monto")
+            ret_com = st.number_input("Comisión (%)", min_value=0.0, step=0.5, key="ret_com")
+        with cr2:
+            ret_a = st.selectbox("Mayorista que RETIRA (A)", list(CASILLEROS.keys()),
+                                 format_func=lambda c: f"{CASILLEROS[c]} ({c})", key="ret_a")
+            ret_cuenta = st.text_input("Número de cuenta destino", key="ret_cuenta")
+            ret_desc = st.text_input("Descripción (opcional)", key="ret_desc")
+
+        if ret_monto:
+            st.caption(f"Egreso que se cargaría a {CASILLEROS[ret_a]}: "
+                       f"${float(ret_monto) * (1 + float(ret_com)/100.0):,.0f} "
+                       f"(${float(ret_monto):,.0f} + {ret_com}%)")
+
+        if st.button("💾 Crear retiro", use_container_width=True):
+            if ret_a == ret_b:
+                st.error("El que retira (A) y el que recibe (B) deben ser distintos.")
+            elif not ret_monto or not str(ret_cuenta).strip():
+                st.error("Completa monto y número de cuenta.")
+            else:
+                egreso = round(float(ret_monto) * (1 + float(ret_com) / 100.0), 2)
+                df_b = load_consignaciones(ret_b)
+                hoy = pd.Timestamp.now().strftime("%Y-%m-%d")
+                nueva = {
+                    "ID":               _next_consignacion_id(df_b),
+                    "Descripcion":      "Retiro de " + CASILLEROS[ret_a] + (f" — {str(ret_desc).strip()}" if str(ret_desc).strip() else ""),
+                    "Monto":            float(ret_monto),
+                    "Fecha":            hoy,
+                    "Numero de cuenta": str(ret_cuenta).strip(),
+                    "Tipo":             "Retiro",
+                    "Estado":           "pendiente",
+                    "Fecha creacion":   hoy,
+                    "Fecha realizado":  "",
+                    "Fecha decision":   "",
+                    "Comprobantes":     "[]",
+                    "Monto abonado":    0,
+                    "Mayorista retira": ret_a,
+                    "Comision %":       float(ret_com),
+                    "ID retiro":        _next_retiro_id(ret_a),
+                    "Egreso retiro":    egreso,
+                }
+                df_new = pd.concat([df_b, pd.DataFrame([nueva])], ignore_index=True)
+                if _save_consignaciones_to_dropbox(df_new, ret_b):
+                    load_consignaciones.clear()
+                    st.success(
+                        f"✅ Retiro {nueva['ID retiro']} creado: {CASILLEROS[ret_a]} retira "
+                        f"${float(ret_monto):,.0f} (egreso ${egreso:,.0f}). "
+                        f"{CASILLEROS[ret_b]} lo cobra como {nueva['ID']}."
+                    )
                     st.rerun()
 
     # ---- (B) Tabla de todas las consignaciones (sin la columna JSON cruda) ----
@@ -836,6 +933,28 @@ if casillero_actual:
                                                     f"Te falta ${falta_new:,.0f}. ¿Adjuntas otro comprobante para completar?"
                                                 )
                                                 st.rerun()
+
+
+# 🏧 Sección "Mis retiros (egresos)" — lo que ESTE mayorista retira (se le carga como egreso)
+if casillero_actual:
+    st.markdown("---")
+    st.header("🏧 Mis retiros (egresos)")
+    retiros_mios = _retiros_de(casillero_actual)
+    if retiros_mios.empty:
+        st.info("No tienes retiros registrados.")
+    else:
+        vista = retiros_mios[["ID retiro", "Descripcion", "Monto", "Comision %", "Egreso retiro", "Estado", "_recibe"]].copy()
+        vista = vista.rename(columns={"_recibe": "Cobra (casillero)"})
+        st.dataframe(vista, use_container_width=True)
+        total = pd.to_numeric(retiros_mios["Egreso retiro"], errors="coerce").fillna(0).sum()
+        aprob = pd.to_numeric(
+            retiros_mios.loc[
+                retiros_mios["Estado"].astype(str).str.strip().str.lower() == "aprobada", "Egreso retiro"
+            ], errors="coerce").fillna(0).sum()
+        c1, c2 = st.columns(2)
+        c1.metric("Total egresos por retiros", f"${total:,.0f}")
+        c2.metric("Egresos de retiros aprobados", f"${aprob:,.0f}")
+        st.caption("🚧 El egreso aún NO se escribe en el histórico (pendiente de activar).")
 
 
 # 7) Filtro por Fecha de Carga
