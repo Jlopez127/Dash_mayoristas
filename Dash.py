@@ -201,9 +201,19 @@ def load_ingresos_con_id(casillero: str) -> dict[str, pd.DataFrame]:
 
 
 
-# ============== Consignaciones (función nueva para Mayra / casillero 9444) ==============
-# Archivo propio en Dropbox: consignaciones_9444.xlsx (molde de _save_clientes_to_dropbox).
-CONSIG_CASILLERO = "9444"
+# ============== Consignaciones (para todos los mayoristas) ==============
+# Un archivo por casillero en Dropbox: consignaciones_<casillero>.xlsx (molde de _save_clientes_to_dropbox).
+# Mapa casillero -> nombre del mayorista (usado por el panel admin para elegir destino).
+CASILLEROS = {
+    "1633":  "Nathalia Ospina",
+    "9444":  "Maira Alejandra Paez",
+    "14856": "Jimmy Cortes",
+    "11591": "Paula Herrera",
+    "1444":  "Maria Moises",
+    "9680":  "Juan Felipe Laverde",
+    "13608": "julian sanchez",
+    "14825": "Cristian Javier Castro",
+}
 CONSIG_SHEET = "Consignaciones"  # nombre de la hoja dentro del xlsx
 CONSIG_COLS = [
     "ID",                # consecutivo propio: Consignacion1, Consignacion2, ...
@@ -224,15 +234,15 @@ CONSIG_TIPOS = ["Nomina", "Proveedor"]
 CONSIG_ESTADOS = ["pendiente", "parcial", "en revision", "aprobada", "rechazada"]
 
 
-def _consignaciones_path() -> str:
-    return f"{get_base_folder()}/consignaciones_{CONSIG_CASILLERO}.xlsx"
+def _consignaciones_path(casillero: str) -> str:
+    return f"{get_base_folder()}/consignaciones_{casillero}.xlsx"
 
 
 @st.cache_data
-def load_consignaciones() -> pd.DataFrame:
-    """Carga consignaciones_9444.xlsx desde Dropbox. Si no existe aún, DF vacío con columnas."""
+def load_consignaciones(casillero: str) -> pd.DataFrame:
+    """Carga consignaciones_<casillero>.xlsx desde Dropbox. Si no existe aún, DF vacío con columnas."""
     try:
-        _, res = dbx.files_download(_consignaciones_path())
+        _, res = dbx.files_download(_consignaciones_path(casillero))
         df = pd.read_excel(io.BytesIO(res.content), sheet_name=CONSIG_SHEET)
     except Exception:
         df = pd.DataFrame(columns=CONSIG_COLS)
@@ -243,7 +253,7 @@ def load_consignaciones() -> pd.DataFrame:
     return df[CONSIG_COLS]
 
 
-def _save_consignaciones_to_dropbox(df_to_save: pd.DataFrame) -> bool:
+def _save_consignaciones_to_dropbox(df_to_save: pd.DataFrame, casillero: str) -> bool:
     """Guarda el DF de consignaciones en Dropbox (mismo patrón que _save_clientes_to_dropbox)."""
     try:
         buf = io.BytesIO()
@@ -253,7 +263,7 @@ def _save_consignaciones_to_dropbox(df_to_save: pd.DataFrame) -> bool:
             df_to_save[cols + rest].to_excel(w, index=False, sheet_name=CONSIG_SHEET)
         buf.seek(0)
         dbx.files_upload(
-            buf.read(), _consignaciones_path(), mode=dropbox.files.WriteMode.overwrite
+            buf.read(), _consignaciones_path(casillero), mode=dropbox.files.WriteMode.overwrite
         )
         return True
     except Exception as e:
@@ -275,30 +285,30 @@ def _next_consignacion_id(df: pd.DataFrame) -> str:
     return f"Consignacion{int(nums.astype(int).max()) + 1}"
 
 
-def _update_consignacion(consig_id: str, updates: dict) -> bool:
+def _update_consignacion(casillero: str, consig_id: str, updates: dict) -> bool:
     """Carga, actualiza la fila por ID, y vuelve a guardar en Dropbox."""
-    df = load_consignaciones()
+    df = load_consignaciones(casillero)
     mask = df["ID"].astype(str) == str(consig_id)
     if not mask.any():
         st.error(f"No se encontró la consignación {consig_id}.")
         return False
     for k, v in updates.items():
         df.loc[mask, k] = v
-    ok = _save_consignaciones_to_dropbox(df)
+    ok = _save_consignaciones_to_dropbox(df, casillero)
     if ok:
         load_consignaciones.clear()
     return ok
 
 
-def _comprobantes_folder() -> str:
-    return f"{get_base_folder()}/comprobantes_{CONSIG_CASILLERO}"
+def _comprobantes_folder(casillero: str) -> str:
+    return f"{get_base_folder()}/comprobantes_{casillero}"
 
 
-def _upload_comprobante(consig_id: str, uploaded_file) -> str | None:
+def _upload_comprobante(casillero: str, consig_id: str, uploaded_file) -> str | None:
     """Sube el pantallazo a Dropbox y devuelve la ruta guardada."""
     try:
         nombre = re.sub(r"[^A-Za-z0-9._-]", "_", str(uploaded_file.name))
-        path = f"{_comprobantes_folder()}/{consig_id}_{nombre}"
+        path = f"{_comprobantes_folder(casillero)}/{consig_id}_{nombre}"
         dbx.files_upload(
             uploaded_file.getvalue(), path, mode=dropbox.files.WriteMode.overwrite
         )
@@ -472,13 +482,21 @@ sheet_name = PASSWORDS[password]
 #    (el admin no tiene hoja en el histórico, así que nunca debe llegar a load_data).
 if sheet_name == ADMIN_SHEET:
     st.header("🛠️ Panel de Administración")
-    st.caption("Gestión de consignaciones — Mayra (casillero 9444)")
 
-    df_consig = load_consignaciones()
+    # Elegir a qué mayorista se le gestionan las consignaciones
+    cas_sel = st.selectbox(
+        "Mayorista",
+        list(CASILLEROS.keys()),
+        format_func=lambda c: f"{CASILLEROS[c]} ({c})",
+        key="admin_casillero",
+    )
+    st.caption(f"Gestión de consignaciones — {CASILLEROS[cas_sel]} (casillero {cas_sel})")
+
+    df_consig = load_consignaciones(cas_sel)
 
     # ---- (A) Crear consignación ----
     with st.container(border=True):
-        st.markdown("**➕ Crear consignación a Mayra**")
+        st.markdown(f"**➕ Crear consignación a {CASILLEROS[cas_sel]}**")
         ca1, ca2 = st.columns(2)
         with ca1:
             new_desc   = st.text_input("Descripción (quién ingresa / concepto)", key="cons_desc")
@@ -507,9 +525,9 @@ if sheet_name == ADMIN_SHEET:
                     "Monto abonado":    0,
                 }
                 df_new = pd.concat([df_consig, pd.DataFrame([nueva])], ignore_index=True)
-                if _save_consignaciones_to_dropbox(df_new):
+                if _save_consignaciones_to_dropbox(df_new, cas_sel):
                     load_consignaciones.clear()
-                    st.success(f"✅ Consignación {nueva['ID']} creada (estado: pendiente).")
+                    st.success(f"✅ Consignación {nueva['ID']} creada para {CASILLEROS[cas_sel]} (estado: pendiente).")
                     st.rerun()
 
     # ---- (B) Tabla de todas las consignaciones (sin la columna JSON cruda) ----
@@ -589,17 +607,17 @@ if sheet_name == ADMIN_SHEET:
 
                 bc1, bc2 = st.columns(2)
                 if bc1.button("✅ Aprobar", key=f"apr_{cid}", use_container_width=True):
-                    ok = _update_consignacion(cid, {
+                    ok = _update_consignacion(cas_sel, cid, {
                         "Estado": "aprobada",
                         "Fecha decision": pd.Timestamp.now().strftime("%Y-%m-%d"),
                     })
                     # 🚧 PENDIENTE (paso final, desactivado para pruebas):
-                    #     aquí irá el append de la fila Ingreso_extra en la hoja de Mayra.
+                    #     aquí irá el append de la fila Ingreso_extra en la hoja del mayorista.
                     if ok:
                         st.success(f"✅ {cid} aprobada. (Aún NO se suma al histórico — pendiente de activar.)")
                         st.rerun()
                 if bc2.button("❌ Rechazar", key=f"rec_{cid}", use_container_width=True):
-                    ok = _update_consignacion(cid, {
+                    ok = _update_consignacion(cas_sel, cid, {
                         "Estado": "rechazada",
                         "Fecha decision": pd.Timestamp.now().strftime("%Y-%m-%d"),
                     })
@@ -698,12 +716,12 @@ else:
     st.info("⚠️ No hay ningún registro 'Total' en el histórico.")
 
 
-# 🧾 Sección "Ingresos por consignaciones" — SOLO para Mayra (casillero 9444)
-if sheet_name == "9444 - Maira Alejandra Paez":
+# 🧾 Sección "Ingresos por consignaciones" — para cualquier mayorista (su propio casillero)
+if casillero_actual:
     st.markdown("---")
     st.header("🧾 Ingresos por consignaciones")
 
-    df_consig_m = load_consignaciones()
+    df_consig_m = load_consignaciones(casillero_actual)
     if df_consig_m.empty:
         st.info("No tienes consignaciones asignadas todavía.")
     else:
@@ -755,7 +773,7 @@ if sheet_name == "9444 - Maira Alejandra Paez":
                             primera = (not fr_actual or fr_actual.lower() == "nan")
                             image_bytes = upl.getvalue()
                             media_type = upl.type or "image/png"
-                            ruta = _upload_comprobante(cid, upl)
+                            ruta = _upload_comprobante(casillero_actual, cid, upl)
                             if ruta:
                                 datos, err = _extraer_datos_comprobante(image_bytes, media_type)
 
@@ -764,7 +782,7 @@ if sheet_name == "9444 - Maira Alejandra Paez":
                                     upd = {"Estado": "en revision"}
                                     if primera:
                                         upd["Fecha realizado"] = hoy
-                                    if _update_consignacion(cid, upd):
+                                    if _update_consignacion(casillero_actual, cid, upd):
                                         st.warning(f"📎 No se pudo leer el comprobante ({err}). Queda en revisión del admin.")
                                         st.rerun()
                                 else:
@@ -778,7 +796,7 @@ if sheet_name == "9444 - Maira Alejandra Paez":
                                             f"⛔ La cuenta del comprobante ({cta_comp}) NO coincide con la cuenta "
                                             f"solicitada ({cuenta_sol}). No se agregó."
                                         )
-                                    elif _es_duplicado_global(load_consignaciones(), cta_comp, datos.get("referencia"), datos.get("monto"), datos.get("fecha")):
+                                    elif _es_duplicado_global(load_consignaciones(casillero_actual), cta_comp, datos.get("referencia"), datos.get("monto"), datos.get("fecha")):
                                         st.error(
                                             f"⚠️ Comprobante DUPLICADO (cuenta {cta_comp}, ref {datos.get('referencia')}, "
                                             f"monto {datos.get('monto')}, fecha {datos.get('fecha')}). No se agregó."
@@ -805,13 +823,13 @@ if sheet_name == "9444 - Maira Alejandra Paez":
                                             # Cubre el total -> aprobación automática (sin tocar el histórico)
                                             upd["Estado"] = "aprobada"
                                             upd["Fecha decision"] = hoy
-                                            if _update_consignacion(cid, upd):
+                                            if _update_consignacion(casillero_actual, cid, upd):
                                                 st.success(f"✅ Pago COMPLETO (${abonado_new:,.0f}). Aprobado automáticamente.")
                                                 st.rerun()
                                         else:
                                             # Falta dinero -> pago parcial; el admin debe verlo si no completa
                                             upd["Estado"] = "parcial"
-                                            if _update_consignacion(cid, upd):
+                                            if _update_consignacion(casillero_actual, cid, upd):
                                                 falta_new = max(solicitado - abonado_new, 0)
                                                 st.warning(
                                                     f"💸 Abonado ${abonado_new:,.0f} de ${solicitado:,.0f}. "
