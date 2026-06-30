@@ -213,6 +213,7 @@ CASILLEROS = {
     "9680":  "Juan Felipe Laverde",
     "13608": "julian sanchez",
     "14825": "Cristian Javier Castro",
+    "13297": "Christian Trujillo",
     # Casilleros de PRUEBA aislados (no son mayoristas reales; solo para testear sin tocar lo real)
     "PRUEBA-9444": "🧪 PRUEBAS (vista Mayra)",
     "PRUEBA-1444": "🧪 PRUEBAS (vista Maria)",
@@ -519,6 +520,7 @@ PASSWORDS = {
     "clave_julian":      "13608 - julian sanchez",
     "clave_juan":        "9680 - Juan Felipe Laverde",
     "clave_cristian":    "14825 - Cristian Javier Castro",
+    "clave_trujillo":    "13297 - Christian Trujillo",
     "clave_admin":       ADMIN_SHEET,
     # Usuario de PRUEBAS: replica la vista de Mayra (misma hoja 9444) para probar el
     # flujo de consignaciones sin usar la clave real de Mayra.
@@ -771,6 +773,7 @@ SHEET_TO_CAS = {
     "9680 - Juan Felipe Laverde":  "9680",
     "13608 - julian sanchez":      "13608",
     "14825 - Cristian Javier Castro": "14825",   # 👈 NUEVO
+    "13297 - Christian Trujillo":     "13297",   # 👈 NUEVO (dash sin facturación)
 }
 
 casillero_actual = SHEET_TO_CAS.get(sheet_name)
