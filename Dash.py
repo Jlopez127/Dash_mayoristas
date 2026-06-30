@@ -2606,7 +2606,16 @@ def run_facturacion_masiva(
             exists = verify_customer(token, ident)
             if not exists:
                 st.write(f"Cliente {ident} no existe en Siigo. Creando...")
-                customer_data = build_customer_from_row(cli_row)
+                try:
+                    customer_data = build_customer_from_row(cli_row)
+                except ValueError as e:
+                    # Datos del cliente incompletos (correo/teléfono/ciudad/etc.).
+                    # No tumbamos toda la facturación: registramos y saltamos este ingreso.
+                    msg = f"Cliente {ident} con datos incompletos, no se pudo crear: {e}"
+                    st.error(msg)
+                    log_invoice_error(id_ingreso, msg)
+                    err_count += 1
+                    continue
 
                 ok_cli, resp_cli = create_customer_siigo(token, customer_data)
                 if not ok_cli:
