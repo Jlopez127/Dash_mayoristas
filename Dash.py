@@ -2512,7 +2512,7 @@ def run_facturacion_masiva(
 
     current_number = int(last_number) + 1
 
-    FACTURA_MAX_NUMERO = 150_000
+    FACTURA_MAX_NUMERO = 250_000  # nueva resolución DIAN (antes 150_000)
     if current_number > FACTURA_MAX_NUMERO - 1:
         st.error(
             f"❌ No es posible continuar.\n"
