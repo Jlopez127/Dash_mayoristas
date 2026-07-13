@@ -1689,11 +1689,20 @@ else:
     # 3) Columna editable para el ID de cliente
     df_view["Nuevo_ID_cliente"] = df_ing_id["Id_cliente"].astype("string").fillna("")
 
-    # Set de IDs válidos en Clientes (acepta esquema maestro o legacy)
-    COL_ID = col_ident(df_clientes) if df_clientes is not None else "Identificacion"
+    # Set de IDs válidos en Clientes.
+    # P0.1: la FUENTE es el mismo df de clientes que usa facturación
+    # (load_ingresos_con_id -> Clientes_MAESTRO.xlsx, con fallback legacy), NO la
+    # descarga directa/module-level de Clientes_<cas>.xlsx. Así un cliente agregado al
+    # maestro (append_cliente_maestro limpia el caché) pasa la validación de inmediato.
+    _cli_dict_val = load_ingresos_con_id(casillero_actual)
+    _df_cli_val = next(
+        (v for k, v in _cli_dict_val.items() if k.lower().startswith("clientes_")),
+        df_clientes,  # fallback: si el loader no trae clientes, usa el df legacy del módulo
+    )
+    COL_ID = col_ident(_df_cli_val) if _df_cli_val is not None else "Identificacion"
     ids_validos = set()
-    if df_clientes is not None and not df_clientes.empty and COL_ID in df_clientes.columns:
-        ids_validos = set(df_clientes[COL_ID].astype(str).str.strip().dropna().unique().tolist())
+    if _df_cli_val is not None and not _df_cli_val.empty and COL_ID in _df_cli_val.columns:
+        ids_validos = set(_df_cli_val[COL_ID].astype(str).str.strip().dropna().unique().tolist())
 
     from streamlit import column_config
     colconf = {"__rowid": column_config.Column(disabled=True, label="")}
