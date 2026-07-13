@@ -195,6 +195,29 @@ def load_ingresos_con_id(casillero: str) -> dict[str, pd.DataFrame]:
         if name not in out:
             out[name] = df
 
+    # --- Preferir Clientes_MAESTRO.xlsx (base única compartida) sobre la legacy per-casillero ---
+    maestro_ent = next(
+        (e for e in entries
+         if isinstance(e, dropbox.files.FileMetadata)
+         and _re.match(r"^clientes_maestro\.xlsx$", e.name, _re.IGNORECASE)),
+        None
+    )
+    if maestro_ent is not None:
+        dfm = _try_download_excel(f"{base_folder}/{maestro_ent.name}")
+        if dfm is not None and not dfm.empty:
+            for col in ("ID_INGRESO", "Factura", "Id_cliente"):
+                if col not in dfm.columns:
+                    dfm[col] = pd.NA
+            # quitar la base legacy per-casillero para que no compita con el maestro
+            for k in [k for k in out if k.lower().startswith("clientes_")]:
+                del out[k]
+            out[maestro_ent.name] = dfm
+    elif any(k.lower().startswith("clientes_") for k in out):
+        st.warning(
+            "⚠️ No se encontró Clientes_MAESTRO.xlsx en Dropbox; usando la base local "
+            f"Clientes_{casillero}.xlsx (fallback). Los clientes NO se comparten entre casilleros."
+        )
+
     return out
 
 
@@ -1250,6 +1273,27 @@ if sheet_name == "Maria Moises 2025" and df_cop is not None:
 ############################################ FACTURACIÓN ############################################################
 # Carga silenciosa de la base "Clientes" para el casillero actual y UI:
 # Orden visual: 1) Filtro  2) Agregar cliente  3) Ver tabla
+# --- Resolución de nombre de columna: acepta esquema MAESTRO (nuevo) y legacy ---
+def col_ident(obj) -> str:
+    """Columna de identificación en un df o Series de clientes.
+    Acepta 'Identificacion' (maestro) o 'Identificación (Obligatorio)' (legacy)."""
+    cols = obj.columns if hasattr(obj, "columns") else obj.index
+    for c in ("Identificacion", "Identificación (Obligatorio)"):
+        if c in cols:
+            return c
+    return "Identificacion"
+
+
+def col_nombre(obj) -> str:
+    """Columna de nombre en un df o Series de clientes.
+    Acepta 'Nombre' (maestro) o 'Nombres del tercero (Obligatorio)' (legacy)."""
+    cols = obj.columns if hasattr(obj, "columns") else obj.index
+    for c in ("Nombre", "Nombres del tercero (Obligatorio)"):
+        if c in cols:
+            return c
+    return "Nombre"
+
+
 # ========================= FACTURACIÓN — CLIENTES =========================
 
 # ✅ Casilleros habilitados para facturación
@@ -1645,8 +1689,8 @@ else:
     # 3) Columna editable para el ID de cliente
     df_view["Nuevo_ID_cliente"] = df_ing_id["Id_cliente"].astype("string").fillna("")
 
-    # Set de IDs válidos en Clientes
-    COL_ID = "Identificación (Obligatorio)"
+    # Set de IDs válidos en Clientes (acepta esquema maestro o legacy)
+    COL_ID = col_ident(df_clientes) if df_clientes is not None else "Identificacion"
     ids_validos = set()
     if df_clientes is not None and not df_clientes.empty and COL_ID in df_clientes.columns:
         ids_validos = set(df_clientes[COL_ID].astype(str).str.strip().dropna().unique().tolist())
@@ -1777,8 +1821,8 @@ if st.button("Preparar facturación", use_container_width=True):
 
             if not ingresos_dfs:
                 st.error("No hay archivos de ingresos para este casillero.")
-            elif clientes_df is None or clientes_df.empty or COL_ID not in clientes_df.columns:
-                st.error("No se encontró la base de Clientes o no tiene la columna 'Identificación (Obligatorio)'.")
+            elif clientes_df is None or clientes_df.empty or col_ident(clientes_df) not in clientes_df.columns:
+                st.error("No se encontró la base de Clientes o no tiene columna de identificación (Identificacion / 'Identificación (Obligatorio)').")
             else:
                 # 2️⃣ Unir TODOS los ingresos del casillero en un solo DF
                 df_ing_list = []
@@ -1883,6 +1927,47 @@ def _clean_id(x) -> str:
     # quita .0 típico cuando Excel/Pandas lo leyó como float
     s = re.sub(r"\.0$", "", s)
     return s
+
+
+def append_cliente_maestro(identificacion, nombre, tipo_id: str = "13") -> bool:
+    """Agrega un cliente a Clientes_MAESTRO.xlsx (3 cols: Identificacion, Nombre, Tipo_ID)
+    SOLO si no existe ya (verificación por _clean_id). Descarga el maestro SIN caché,
+    hace append, sube en modo overwrite y limpia el caché de clientes.
+    Devuelve True si lo agregó; False (SIN excepción) si ya existía o el id es inválido.
+    NOTA: definida para P4; su integración en el flujo (crear cliente) es un paso posterior.
+    """
+    ident = _clean_id(identificacion)
+    if not ident:
+        return False
+
+    path = f"{get_base_folder()}/Clientes_MAESTRO.xlsx"
+    # Descargar SIN caché (directo a Dropbox). Si no existe aún, se crea con este cliente.
+    try:
+        _, res = dbx.files_download(path)
+        dfm = pd.read_excel(io.BytesIO(res.content))
+    except Exception:
+        dfm = pd.DataFrame(columns=["Identificacion", "Nombre", "Tipo_ID"])
+
+    ci = col_ident(dfm)
+    if ci in dfm.columns and dfm[ci].map(_clean_id).eq(ident).any():
+        return False  # ya existe -> no duplica
+
+    fila = {"Identificacion": ident,
+            "Nombre": str(nombre).strip(),
+            "Tipo_ID": (str(tipo_id).strip() or "13")}
+    dfm_out = pd.concat([dfm, pd.DataFrame([fila])], ignore_index=True)
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        dfm_out.to_excel(w, index=False, sheet_name="Clientes")
+    buf.seek(0)
+    dbx.files_upload(buf.read(), path, mode=dropbox.files.WriteMode.overwrite)
+
+    try:
+        load_ingresos_con_id.clear()
+    except Exception:
+        pass
+    return True
 
 
 
@@ -2214,11 +2299,11 @@ def build_customer_from_row(cli_row: pd.Series) -> dict:
     NO revienta si apellidos vienen vacíos: intenta inferirlos.
     """
 
-    identificacion = _clean_id(cli_row.get("Identificación (Obligatorio)"))
+    identificacion = _clean_id(cli_row.get(col_ident(cli_row)))
     if not identificacion:
         raise ValueError("Identificación del cliente vacía")
 
-    nombres = _clean_text(cli_row.get("Nombres del tercero (Obligatorio)"))
+    nombres = _clean_text(cli_row.get(col_nombre(cli_row)))
     apellidos = _clean_text(cli_row.get("Apellidos del tercero (Obligatorio)"))
 
     # Si existe un campo de nombre completo en tu base (si no, no pasa nada)
@@ -2486,8 +2571,8 @@ def run_facturacion_masiva(
     else:
         df_ing_pend["Id_cliente"] = ""
 
-    # Normalizar identificación en clientes
-    COL_ID = "Identificación (Obligatorio)"
+    # Normalizar identificación en clientes (acepta esquema maestro o legacy)
+    COL_ID = col_ident(df_clientes) if df_clientes is not None else "Identificacion"
     if df_clientes is not None and not df_clientes.empty and COL_ID in df_clientes.columns:
         df_clientes[COL_ID] = df_clientes[COL_ID].apply(_clean_id)
 
