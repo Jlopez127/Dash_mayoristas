@@ -19,6 +19,7 @@ import pandas as pd
 import math
 import base64
 import json
+from divipola import selector_divipola  # selector Departamento->Municipio (DANE), vendorizado
 
 
 
@@ -1465,9 +1466,18 @@ with st.container(border=True):
     )
 
 # ======================= (2) Alta de nuevo cliente ===========================
+# ⛔ TAREA 6: alta legacy RETIRADA. Este form capturaba PII (tel/correo/dirección) y la
+# escribía a Clientes_<cas>.xlsx en Dropbox. La única vía para crear clientes es ahora el
+# form "➕ Crear cliente nuevo" (crea directo en Siigo; la PII no toca Dropbox).
+HABILITAR_ALTA_LEGACY_PII = False
 with st.container(border=True):
-    st.markdown("**¿Deseas agregar un nuevo cliente?**")
-    add_choice = st.radio("Selecciona una opción:", ["No", "Sí"], horizontal=True, index=0, key="cli_add_choice")
+    if not HABILITAR_ALTA_LEGACY_PII:
+        st.info("➕ Para crear un cliente nuevo usa **'Crear cliente nuevo'** (más abajo): crea directo "
+                "en Siigo. El alta antigua que guardaba datos en Dropbox fue retirada.")
+        add_choice = "No"
+    else:
+        st.markdown("**¿Deseas agregar un nuevo cliente?**")
+        add_choice = st.radio("Selecciona una opción:", ["No", "Sí"], horizontal=True, index=0, key="cli_add_choice")
 
     if add_choice == "Sí":
         c1, c2 = st.columns(2)
@@ -1550,31 +1560,26 @@ with st.container(border=True):
                                 st.success("✅ Cliente guardado correctamente.")
                                 st.rerun()
 
-# ======================= (3) Ver tabla (aplicando filtro) ====================
-# Toma siempre lo último desde session_state (post-guardado)
-# ======================= (3) Ver tabla (SOLO si se busca + match exacto) ====================
-ing_sess = st.session_state.get("ingresos_id_archivos", {}) or {}
-df_clientes = ing_sess.get(f"Clientes_{casillero_actual}.xlsx", df_clientes)
-
-if df_clientes is None:
-    df_clientes = pd.DataFrame(columns=REQUIRED_COLS)
+# ======================= (3) Ver tabla (SOLO doc+nombre, desde el MAESTRO) ====================
+# TAREA 6b: la búsqueda lee del MAESTRO (load_ingresos_con_id -> Clientes_MAESTRO.xlsx, con
+# fallback legacy) y muestra SOLO documento y nombre; nunca teléfono/correo/dirección aunque
+# existieran en archivos legacy.
+_cli_dict_g = load_ingresos_con_id(casillero_actual)
+_df_g = next((v for k, v in _cli_dict_g.items() if k.lower().startswith("clientes_")), None)
 
 with st.container():
-    # No mostrar tabla a menos que se busque
-    if not filt_id or not str(filt_id).strip():
+    if _df_g is None or _df_g.empty:
+        st.info("Base de clientes no disponible.")
+    elif not filt_id or not str(filt_id).strip():
         st.info("Escribe una identificación para buscar.")
     else:
+        _ci, _cn = col_ident(_df_g), col_nombre(_df_g)
         q_raw = str(filt_id).strip()
-        q_norm = norm_id(q_raw)  # usa tu normalizador (quita . , espacios, etc)
-
-        # Match exacto: por ID crudo o por ID normalizado
-        mask = (
-            df_clientes[COL_ID].astype(str).str.strip().eq(q_raw)
-            | df_clientes["_id_norm"].astype(str).str.strip().eq(q_norm)
-        )
-
-        df_mostrar = df_clientes.loc[mask].copy()
-
+        q_norm = norm_id(q_raw)
+        serie_id = _df_g[_ci].astype(str).str.strip()
+        mask = serie_id.eq(q_raw) | serie_id.map(norm_id).eq(q_norm)
+        df_mostrar = _df_g.loc[mask, [_ci, _cn]].copy()  # SOLO doc + nombre (nunca PII)
+        df_mostrar.columns = ["Identificación", "Nombre"]
         if df_mostrar.empty:
             st.info("No existe cliente con ese ID.")
         else:
@@ -2382,6 +2387,61 @@ def build_customer_from_row(cli_row: pd.Series) -> dict:
     return payload
 
 
+def calcular_dv_nit(nit) -> int:
+    """Dígito de verificación del NIT (algoritmo DIAN).
+    Pesos aplicados de derecha a izquierda; suma mod 11; si residuo > 1 -> 11-residuo, si no residuo."""
+    pesos = [3, 7, 13, 17, 19, 23, 29, 37, 41, 43, 47, 53, 59, 67, 71]
+    digitos = [int(c) for c in re.sub(r"\D", "", str(nit))]
+    suma = sum(d * pesos[i] for i, d in enumerate(reversed(digitos)))
+    residuo = suma % 11
+    return 11 - residuo if residuo > 1 else residuo
+
+
+def build_customer_manual(tipo_id, ident, nombres, apellidos, razon_social,
+                          telefono, correo, state_code, city_code, direccion) -> dict:
+    """Payload de cliente para Siigo desde el FORM MANUAL (NO desde Excel).
+    CC(13)/CE(22) -> Person, name=[nombres, apellidos].
+    NIT(31)      -> Company, name=[razón social], check_digit=calcular_dv_nit(ident).
+    Mismos defaults/estructura que build_customer_from_row (que NO se modifica).
+    La PII (tel/correo/dirección) vive SOLO en este dict que viaja al request de Siigo."""
+    identificacion = _clean_id(ident)
+    tel = _clean_phone(telefono)
+    email = _clean_text(correo)
+    dire = _clean_text(direccion) or "No especificado"
+    addr = {
+        "address": dire,
+        "city": {"country_code": "CO", "state_code": str(state_code).zfill(2), "city_code": str(city_code).zfill(5)},
+    }
+
+    if str(tipo_id) == "31":  # NIT -> Company
+        rs = _clean_text(razon_social)
+        return {
+            "type": "Customer",
+            "person_type": "Company",
+            "id_type": "31",
+            "identification": identificacion,
+            "check_digit": str(calcular_dv_nit(identificacion)),
+            "name": [rs],
+            "address": addr,
+            "phones": [{"number": tel}],
+            "contacts": [{"first_name": rs, "last_name": rs, "email": email}],
+        }
+
+    # CC(13) / CE(22) -> Person
+    nom = _clean_text(nombres)
+    ape = _clean_text(apellidos)
+    return {
+        "type": "Customer",
+        "person_type": "Person",
+        "id_type": str(tipo_id),
+        "identification": identificacion,
+        "name": [nom, ape],
+        "address": addr,
+        "phones": [{"number": tel}],
+        "contacts": [{"first_name": nom, "last_name": ape, "email": email}],
+    }
+
+
 
 
 
@@ -2926,6 +2986,97 @@ def run_facturacion_masiva(
 
 
 
+
+
+# ============================ ➕ CREAR CLIENTE NUEVO (directo en Siigo) ============================
+# TAREA 1/3/4. Verify-first. REGLA DURA DE PII: teléfono/correo/dirección SOLO viajan en el request
+# a Siigo — se leen de widgets SIN key (no quedan bajo un nombre en session_state) y NUNCA se
+# escriben a Excel, logs ni session_state. Al maestro solo va documento + nombre.
+_TIPO_ID_OPCIONES = {"CC — Cédula": "13", "CE — Cédula de extranjería": "22", "NIT — Empresa": "31"}
+
+
+def _crear_cliente_submit(tipo_id, ident, nombres, apellidos, razon,
+                          telefono, correo, state_code, city_code, direccion):
+    ident_c = _clean_id(ident)
+    nombre_capturado = _clean_text(razon) if tipo_id == "31" else \
+        (f"{_clean_text(nombres)} {_clean_text(apellidos)}").strip()
+
+    if not ident_c:
+        st.error("Identificación vacía."); return
+    if tipo_id == "31" and not nombre_capturado:
+        st.error("Razón social obligatoria."); return
+    if tipo_id != "31" and not (_clean_text(nombres) and _clean_text(apellidos)):
+        st.error("Nombres y apellidos obligatorios."); return
+
+    # a) token
+    token = obtain_token()
+    if not token:
+        st.error("No se pudo autenticar con Siigo. Intenta de nuevo."); return
+
+    # b) verify-first (SOLO con la identificación)
+    if verify_customer(token, ident_c):
+        append_cliente_maestro(ident_c, nombre_capturado, tipo_id)  # limpia caché de clientes
+        st.info("El cliente ya existía en Siigo; se agregó a la base local (maestro).")
+        return
+
+    # validaciones de PII SOLO al crear
+    if not re.match(r"^\d{7,10}$", _clean_phone(telefono) or ""):
+        st.error("Teléfono inválido (7 a 10 dígitos)."); return
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", _clean_text(correo)):
+        st.error("Correo electrónico inválido."); return
+    if not state_code or not city_code:
+        st.error("Selecciona departamento y municipio."); return
+
+    # c) crear en Siigo
+    payload = build_customer_manual(tipo_id, ident_c, nombres, apellidos, razon,
+                                    telefono, correo, state_code, city_code, direccion)
+    ok, resp = create_customer_siigo(token, payload)
+    del payload  # no retener el payload (con PII) más de lo necesario
+    if ok:
+        append_cliente_maestro(ident_c, nombre_capturado, tipo_id)  # doc+nombre al maestro + limpia caché
+        st.success(f"✅ Cliente {ident_c} creado en Siigo y agregado a la base local.")
+    else:
+        st.error(f"❌ Siigo rechazó la creación: {resp}")  # detalle de Siigo, SIN el payload
+
+
+def _crear_cliente_form():
+    tipo_label = st.selectbox("Tipo de identificación", list(_TIPO_ID_OPCIONES.keys()), key="cc_tipo")
+    tipo_id = _TIPO_ID_OPCIONES[tipo_label]
+
+    if tipo_id == "31":
+        st.caption("NIT: escribe el número **sin** el dígito de verificación (se calcula solo).")
+    ident = st.text_input("Identificación", key="cc_ident")
+
+    nombres = apellidos = razon = ""
+    if tipo_id == "31":
+        razon = st.text_input("Razón social", key="cc_razon")
+    else:
+        ca, cb = st.columns(2)
+        nombres = ca.text_input("Nombres", key="cc_nom")
+        apellidos = cb.text_input("Apellidos", key="cc_ape")
+
+    # ⚠️ PII: text_input SIN key -> no queda bajo un nombre persistente en session_state.
+    telefono = st.text_input("Teléfono (7-10 dígitos)")
+    correo = st.text_input("Correo electrónico")
+    state_code, city_code = selector_divipola("crear_cliente")
+    direccion = st.text_input("Dirección (opcional)", placeholder="No especificado")
+
+    if st.button("Crear cliente en Siigo", use_container_width=True):
+        _crear_cliente_submit(tipo_id, ident, nombres, apellidos, razon,
+                              telefono, correo, state_code, city_code, direccion)
+
+
+st.divider()
+st.subheader("➕ Crear cliente nuevo (directo en Siigo)")
+if hasattr(st, "dialog"):
+    @st.dialog("➕ Crear cliente nuevo")
+    def _crear_cliente_dialog():
+        _crear_cliente_form()
+    if st.button("➕ Crear cliente nuevo", key="cc_open", use_container_width=True):
+        _crear_cliente_dialog()
+else:
+    with st.expander("➕ Crear cliente nuevo"):
+        _crear_cliente_form()
 
 
 st.subheader("2️⃣ Ejecutar facturación automática en Siigo")
