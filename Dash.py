@@ -19,6 +19,8 @@ import pandas as pd
 import math
 import base64
 import json
+import requests
+from divipola import selector_divipola  # selector Departamento->Municipio (DANE), vendorizado
 
 
 
@@ -194,6 +196,29 @@ def load_ingresos_con_id(casillero: str) -> dict[str, pd.DataFrame]:
         # Evitar duplicados por nombre
         if name not in out:
             out[name] = df
+
+    # --- Preferir Clientes_MAESTRO.xlsx (base única compartida) sobre la legacy per-casillero ---
+    maestro_ent = next(
+        (e for e in entries
+         if isinstance(e, dropbox.files.FileMetadata)
+         and _re.match(r"^clientes_maestro\.xlsx$", e.name, _re.IGNORECASE)),
+        None
+    )
+    if maestro_ent is not None:
+        dfm = _try_download_excel(f"{base_folder}/{maestro_ent.name}")
+        if dfm is not None and not dfm.empty:
+            for col in ("ID_INGRESO", "Factura", "Id_cliente"):
+                if col not in dfm.columns:
+                    dfm[col] = pd.NA
+            # quitar la base legacy per-casillero para que no compita con el maestro
+            for k in [k for k in out if k.lower().startswith("clientes_")]:
+                del out[k]
+            out[maestro_ent.name] = dfm
+    elif any(k.lower().startswith("clientes_") for k in out):
+        st.warning(
+            "⚠️ No se encontró Clientes_MAESTRO.xlsx en Dropbox; usando la base local "
+            f"Clientes_{casillero}.xlsx (fallback). Los clientes NO se comparten entre casilleros."
+        )
 
     return out
 
@@ -1250,16 +1275,152 @@ if sheet_name == "Maria Moises 2025" and df_cop is not None:
 ############################################ FACTURACIÓN ############################################################
 # Carga silenciosa de la base "Clientes" para el casillero actual y UI:
 # Orden visual: 1) Filtro  2) Agregar cliente  3) Ver tabla
+# --- Resolución de nombre de columna: acepta esquema MAESTRO (nuevo) y legacy ---
+def col_ident(obj) -> str:
+    """Columna de identificación en un df o Series de clientes.
+    Acepta 'Identificacion' (maestro) o 'Identificación (Obligatorio)' (legacy)."""
+    cols = obj.columns if hasattr(obj, "columns") else obj.index
+    for c in ("Identificacion", "Identificación (Obligatorio)"):
+        if c in cols:
+            return c
+    return "Identificacion"
+
+
+def col_nombre(obj) -> str:
+    """Columna de nombre en un df o Series de clientes.
+    Acepta 'Nombre' (maestro) o 'Nombres del tercero (Obligatorio)' (legacy)."""
+    cols = obj.columns if hasattr(obj, "columns") else obj.index
+    for c in ("Nombre", "Nombres del tercero (Obligatorio)"):
+        if c in cols:
+            return c
+    return "Nombre"
+
+
 # ========================= FACTURACIÓN — CLIENTES =========================
 
-# ✅ Casilleros habilitados para facturación
-FACT_CAS_ALLOW = {"9680", "13608", "1633", "1444"}
+# ✅ ÚNICA FUENTE DE VERDAD de "casillero con facturación habilitada": las KEYS de este dict.
+# Habilitar un casillero = agregar su entrada con su texto de observaciones (intencional).
+# ── Helpers Siigo + maestro (definición ÚNICA aquí, antes del módulo de facturación) para que la
+#    validación del Vista pueda hacer el fallback a Siigo. ──
+SIIGO_BASE_URL = "https://api.siigo.com"
+NOMBRE_DE_MI_APP = "AutomatizacionFacturasEncargomio"
+
+
+def _clean_id(x) -> str:
+    s = "" if x is None else str(x).strip()
+    if s.lower() in {"", "nan", "none", "null", "<na>"}:
+        return ""
+    return re.sub(r"\.0$", "", s)  # quita '.0' típico si Excel lo leyó como float
+
+
+def obtain_token():
+    """Token de Siigo con st.secrets['siigo']['username'] y ['access_key']. None si falla."""
+    try:
+        resp = requests.post(
+            f"{SIIGO_BASE_URL}/auth",
+            json={"username": st.secrets["siigo"]["username"], "access_key": st.secrets["siigo"]["access_key"]},
+            headers={"Content-Type": "application/json", "Partner-Id": NOMBRE_DE_MI_APP},
+            timeout=30,
+        )
+        try:
+            data = resp.json()
+        except json.JSONDecodeError:
+            return None
+        if resp.status_code == 200 and data.get("access_token"):
+            return data["access_token"]
+        return None
+    except requests.exceptions.RequestException:
+        return None
+
+
+def get_customer_siigo(access_token: str, identificacion: str):
+    """GET /v1/customers?identification=. {identification, name, id_type} del primer resultado
+    (name lista -> une con espacio; id_type dict -> 'code'). None si no existe o error HTTP (loggea)."""
+    url = f"https://api.siigo.com/v1/customers?identification={identificacion}"
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {access_token}", "Partner-Id": NOMBRE_DE_MI_APP}
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+        data = resp.json()
+        if resp.status_code == 200:
+            results = data.get("results") or []
+            if not results:
+                return None
+            c = results[0]
+            nombre = c.get("name")
+            if isinstance(nombre, list):
+                nombre = " ".join(str(x).strip() for x in nombre if str(x).strip())
+            idt = c.get("id_type")
+            if isinstance(idt, dict):
+                idt = idt.get("code")
+            return {
+                "identification": str(c.get("identification", identificacion)).strip(),
+                "name": str(nombre or "").strip(),
+                "id_type": str(idt).strip() if idt else None,
+            }
+        print("❌ ERROR get_customer_siigo:", resp.status_code, data)
+        return None
+    except Exception as e:
+        print("❌ ERROR get_customer_siigo:", e)
+        return None
+
+
+def append_cliente_maestro(identificacion, nombre, tipo_id: str = "13") -> bool:
+    """Agrega un cliente a Clientes_MAESTRO.xlsx (Identificacion, Nombre, Tipo_ID) SOLO si no existe
+    (por _clean_id). Descarga SIN caché, append, overwrite, limpia caché. True si agregó; False si
+    ya existía o id inválido. Solo va doc+nombre al maestro (nunca PII)."""
+    ident = _clean_id(identificacion)
+    if not ident:
+        return False
+    path = f"{get_base_folder()}/Clientes_MAESTRO.xlsx"
+    try:
+        _, res = dbx.files_download(path)
+        dfm = pd.read_excel(io.BytesIO(res.content))
+    except Exception:
+        dfm = pd.DataFrame(columns=["Identificacion", "Nombre", "Tipo_ID"])
+    ci = col_ident(dfm)
+    if ci in dfm.columns and dfm[ci].map(_clean_id).eq(ident).any():
+        return False
+    fila = {"Identificacion": ident, "Nombre": str(nombre).strip(), "Tipo_ID": (str(tipo_id).strip() or "13")}
+    dfm_out = pd.concat([dfm, pd.DataFrame([fila])], ignore_index=True)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        dfm_out.to_excel(w, index=False, sheet_name="Clientes")
+    buf.seek(0)
+    dbx.files_upload(buf.read(), path, mode=dropbox.files.WriteMode.overwrite)
+    try:
+        load_ingresos_con_id.clear()
+    except Exception:
+        pass
+    return True
+
+
+OBSERVACIONES_POR_CASILLERO = {
+    "9680": (
+        "Esta factura corresponde a compras realizadas, por medio de J&L Suministros. Los cuales ya se encuentran pagos."
+    ),
+    "13608": (
+        "Esta factura corresponde a pedidos realizados, por medio de NEWTEC SAS / DATEC SAS. Los cuales ya se encuentran pagos."
+    ),
+    "1633": (
+        "Esta factura corresponde a pedidos realizados, por medio de INJ personal shopper. Los cuales ya se encuentran pagos."
+    ),
+    "1444": (
+        "Esta factura corresponde a compras o envíos realizados, por medio de @mariapazshop Tienda de Instagram. Los cuales ya se encuentran pagos"
+    ),
+}
+
+
+def casillero_factura(casillero) -> bool:
+    """True si el casillero tiene facturación habilitada (única fuente: keys de OBSERVACIONES_POR_CASILLERO)."""
+    return str(casillero) in OBSERVACIONES_POR_CASILLERO
+
 
 st.subheader("📇 Facturación — Clientes")
 
-# ⛔ Bloqueo total si no aplica facturación
-if casillero_actual not in FACT_CAS_ALLOW:
-    st.info("📌 El módulo de facturación solo está disponible para 9680, 13608, 1633 y 1444.")
+# ⛔ Bloqueo total si no aplica facturación (todo el módulo va DESPUÉS de este st.stop -> los
+#    casilleros no habilitados no ven nada del módulo).
+if not casillero_factura(casillero_actual):
+    st.info("📌 El módulo de facturación solo está disponible para los casilleros habilitados.")
     st.stop()
 
 # -------------------- A PARTIR DE AQUÍ FACTURACIÓN ACTIVA --------------------
@@ -1421,9 +1582,18 @@ with st.container(border=True):
     )
 
 # ======================= (2) Alta de nuevo cliente ===========================
+# ⛔ TAREA 6: alta legacy RETIRADA. Este form capturaba PII (tel/correo/dirección) y la
+# escribía a Clientes_<cas>.xlsx en Dropbox. La única vía para crear clientes es ahora el
+# form "➕ Crear cliente nuevo" (crea directo en Siigo; la PII no toca Dropbox).
+HABILITAR_ALTA_LEGACY_PII = False
 with st.container(border=True):
-    st.markdown("**¿Deseas agregar un nuevo cliente?**")
-    add_choice = st.radio("Selecciona una opción:", ["No", "Sí"], horizontal=True, index=0, key="cli_add_choice")
+    if not HABILITAR_ALTA_LEGACY_PII:
+        st.info("➕ Para crear un cliente nuevo usa **'Crear cliente nuevo'** (más abajo): crea directo "
+                "en Siigo. El alta antigua que guardaba datos en Dropbox fue retirada.")
+        add_choice = "No"
+    else:
+        st.markdown("**¿Deseas agregar un nuevo cliente?**")
+        add_choice = st.radio("Selecciona una opción:", ["No", "Sí"], horizontal=True, index=0, key="cli_add_choice")
 
     if add_choice == "Sí":
         c1, c2 = st.columns(2)
@@ -1506,31 +1676,26 @@ with st.container(border=True):
                                 st.success("✅ Cliente guardado correctamente.")
                                 st.rerun()
 
-# ======================= (3) Ver tabla (aplicando filtro) ====================
-# Toma siempre lo último desde session_state (post-guardado)
-# ======================= (3) Ver tabla (SOLO si se busca + match exacto) ====================
-ing_sess = st.session_state.get("ingresos_id_archivos", {}) or {}
-df_clientes = ing_sess.get(f"Clientes_{casillero_actual}.xlsx", df_clientes)
-
-if df_clientes is None:
-    df_clientes = pd.DataFrame(columns=REQUIRED_COLS)
+# ======================= (3) Ver tabla (SOLO doc+nombre, desde el MAESTRO) ====================
+# TAREA 6b: la búsqueda lee del MAESTRO (load_ingresos_con_id -> Clientes_MAESTRO.xlsx, con
+# fallback legacy) y muestra SOLO documento y nombre; nunca teléfono/correo/dirección aunque
+# existieran en archivos legacy.
+_cli_dict_g = load_ingresos_con_id(casillero_actual)
+_df_g = next((v for k, v in _cli_dict_g.items() if k.lower().startswith("clientes_")), None)
 
 with st.container():
-    # No mostrar tabla a menos que se busque
-    if not filt_id or not str(filt_id).strip():
+    if _df_g is None or _df_g.empty:
+        st.info("Base de clientes no disponible.")
+    elif not filt_id or not str(filt_id).strip():
         st.info("Escribe una identificación para buscar.")
     else:
+        _ci, _cn = col_ident(_df_g), col_nombre(_df_g)
         q_raw = str(filt_id).strip()
-        q_norm = norm_id(q_raw)  # usa tu normalizador (quita . , espacios, etc)
-
-        # Match exacto: por ID crudo o por ID normalizado
-        mask = (
-            df_clientes[COL_ID].astype(str).str.strip().eq(q_raw)
-            | df_clientes["_id_norm"].astype(str).str.strip().eq(q_norm)
-        )
-
-        df_mostrar = df_clientes.loc[mask].copy()
-
+        q_norm = norm_id(q_raw)
+        serie_id = _df_g[_ci].astype(str).str.strip()
+        mask = serie_id.eq(q_raw) | serie_id.map(norm_id).eq(q_norm)
+        df_mostrar = _df_g.loc[mask, [_ci, _cn]].copy()  # SOLO doc + nombre (nunca PII)
+        df_mostrar.columns = ["Identificación", "Nombre"]
         if df_mostrar.empty:
             st.info("No existe cliente con ese ID.")
         else:
@@ -1645,11 +1810,20 @@ else:
     # 3) Columna editable para el ID de cliente
     df_view["Nuevo_ID_cliente"] = df_ing_id["Id_cliente"].astype("string").fillna("")
 
-    # Set de IDs válidos en Clientes
-    COL_ID = "Identificación (Obligatorio)"
+    # Set de IDs válidos en Clientes.
+    # P0.1: la FUENTE es el mismo df de clientes que usa facturación
+    # (load_ingresos_con_id -> Clientes_MAESTRO.xlsx, con fallback legacy), NO la
+    # descarga directa/module-level de Clientes_<cas>.xlsx. Así un cliente agregado al
+    # maestro (append_cliente_maestro limpia el caché) pasa la validación de inmediato.
+    _cli_dict_val = load_ingresos_con_id(casillero_actual)
+    _df_cli_val = next(
+        (v for k, v in _cli_dict_val.items() if k.lower().startswith("clientes_")),
+        df_clientes,  # fallback: si el loader no trae clientes, usa el df legacy del módulo
+    )
+    COL_ID = col_ident(_df_cli_val) if _df_cli_val is not None else "Identificacion"
     ids_validos = set()
-    if df_clientes is not None and not df_clientes.empty and COL_ID in df_clientes.columns:
-        ids_validos = set(df_clientes[COL_ID].astype(str).str.strip().dropna().unique().tolist())
+    if _df_cli_val is not None and not _df_cli_val.empty and COL_ID in _df_cli_val.columns:
+        ids_validos = set(_df_cli_val[COL_ID].astype(str).str.strip().dropna().unique().tolist())
 
     from streamlit import column_config
     colconf = {"__rowid": column_config.Column(disabled=True, label="")}
@@ -1685,12 +1859,27 @@ else:
             else:
                 df_nonempty = df_apply[df_apply["Nuevo_ID_cliente"].ne("")]
                 ids_no_existen = sorted({i for i in df_nonempty["Nuevo_ID_cliente"].tolist() if i not in ids_validos})
+                # TAREA 2: los que NO están en el maestro -> buscarlos en Siigo antes de rechazar
+                if ids_no_existen:
+                    _tok = obtain_token()
+                    _traidos, _faltan = [], []
+                    for _idx in ids_no_existen:
+                        _cust = get_customer_siigo(_tok, _idx) if _tok else None
+                        if _cust:
+                            append_cliente_maestro(_cust["identification"], _cust["name"], _cust.get("id_type") or "13")
+                            _traidos.append(_cust["name"] or _idx)
+                        else:
+                            _faltan.append(_idx)
+                    if _traidos:
+                        st.info("Cliente(s) traído(s) desde Siigo: " + ", ".join(_traidos) + ".")
+                    ids_no_existen = _faltan
                 if ids_no_existen:
                     st.error(
                         "Estos ID(s) NO existen en Clientes. Debes crearlos primero:\n- "
                         + "\n- ".join(ids_no_existen[:30])
                         + ("..." if len(ids_no_existen) > 30 else "")
                     )
+                    st.warning("Si el cliente aún no existe, créalo con el botón **'➕ Crear cliente nuevo'**.")
                 else:
                     for _, r in df_apply.iterrows():
                         rid = r["__rowid"]
@@ -1736,6 +1925,9 @@ st.divider()
 st.subheader("🧾 Generar facturación")
 
 if st.button("Preparar facturación", use_container_width=True):
+    if not casillero_factura(casillero_actual):
+        st.error("Este casillero no tiene facturación habilitada.")
+        st.stop()
     COL_ID = "Identificación (Obligatorio)"
 
     if not casillero_actual:
@@ -1777,8 +1969,8 @@ if st.button("Preparar facturación", use_container_width=True):
 
             if not ingresos_dfs:
                 st.error("No hay archivos de ingresos para este casillero.")
-            elif clientes_df is None or clientes_df.empty or COL_ID not in clientes_df.columns:
-                st.error("No se encontró la base de Clientes o no tiene la columna 'Identificación (Obligatorio)'.")
+            elif clientes_df is None or clientes_df.empty or col_ident(clientes_df) not in clientes_df.columns:
+                st.error("No se encontró la base de Clientes o no tiene columna de identificación (Identificacion / 'Identificación (Obligatorio)').")
             else:
                 # 2️⃣ Unir TODOS los ingresos del casillero en un solo DF
                 df_ing_list = []
@@ -1875,54 +2067,14 @@ def _clean_code_numeric(x) -> str:
     s = re.sub(r"[^\d]", "", s)
     return s
 
-def _clean_id(x) -> str:
-    s = "" if x is None else str(x).strip()
-    s_low = s.lower()
-    if s_low in {"", "nan", "none", "null", "<na>"}:
-        return ""
-    # quita .0 típico cuando Excel/Pandas lo leyó como float
-    s = re.sub(r"\.0$", "", s)
-    return s
+# _clean_id y append_cliente_maestro se definen ARRIBA (bloque de helpers antes del módulo).
 
 
 
 
 
 
-SIIGO_BASE_URL = "https://api.siigo.com"
-NOMBRE_DE_MI_APP = "AutomatizacionFacturasEncargomio"
-
-
-def obtain_token() -> str | None:
-    """
-    Obtiene token de Siigo usando st.secrets["siigo"]["username"] y ["access_key"].
-    """
-    API_URL = f"{SIIGO_BASE_URL}/auth"
-
-    credentials = {
-        "username": st.secrets["siigo"]["username"],
-        "access_key": st.secrets["siigo"]["access_key"],
-    }
-
-    headers = {
-        "Content-Type": "application/json",
-        "Partner-Id": NOMBRE_DE_MI_APP
-    }
-
-    try:
-        resp = requests.post(API_URL, json=credentials, headers=headers, timeout=30)
-        try:
-            data = resp.json()
-        except json.JSONDecodeError:
-            return None
-
-        if resp.status_code == 200 and data.get("access_token"):
-            return data["access_token"]
-
-        return None
-
-    except requests.exceptions.RequestException:
-        return None
+# SIIGO_BASE_URL, NOMBRE_DE_MI_APP y obtain_token se definen ARRIBA (bloque de helpers).
 
 
 
@@ -1954,6 +2106,9 @@ def verify_customer(access_token: str, customer_identification: str) -> bool:
     except Exception as e:
         print("❌ ERROR verify_customer:", e)
         return False
+
+
+# get_customer_siigo se define ARRIBA (bloque de helpers antes del módulo).
 
 
 def create_customer_siigo(access_token: str, customer_data: dict):
@@ -2214,11 +2369,11 @@ def build_customer_from_row(cli_row: pd.Series) -> dict:
     NO revienta si apellidos vienen vacíos: intenta inferirlos.
     """
 
-    identificacion = _clean_id(cli_row.get("Identificación (Obligatorio)"))
+    identificacion = _clean_id(cli_row.get(col_ident(cli_row)))
     if not identificacion:
         raise ValueError("Identificación del cliente vacía")
 
-    nombres = _clean_text(cli_row.get("Nombres del tercero (Obligatorio)"))
+    nombres = _clean_text(cli_row.get(col_nombre(cli_row)))
     apellidos = _clean_text(cli_row.get("Apellidos del tercero (Obligatorio)"))
 
     # Si existe un campo de nombre completo en tu base (si no, no pasa nada)
@@ -2288,6 +2443,61 @@ def build_customer_from_row(cli_row: pd.Series) -> dict:
     return payload
 
 
+def calcular_dv_nit(nit) -> int:
+    """Dígito de verificación del NIT (algoritmo DIAN).
+    Pesos aplicados de derecha a izquierda; suma mod 11; si residuo > 1 -> 11-residuo, si no residuo."""
+    pesos = [3, 7, 13, 17, 19, 23, 29, 37, 41, 43, 47, 53, 59, 67, 71]
+    digitos = [int(c) for c in re.sub(r"\D", "", str(nit))]
+    suma = sum(d * pesos[i] for i, d in enumerate(reversed(digitos)))
+    residuo = suma % 11
+    return 11 - residuo if residuo > 1 else residuo
+
+
+def build_customer_manual(tipo_id, ident, nombres, apellidos, razon_social,
+                          telefono, correo, state_code, city_code, direccion) -> dict:
+    """Payload de cliente para Siigo desde el FORM MANUAL (NO desde Excel).
+    CC(13)/CE(22) -> Person, name=[nombres, apellidos].
+    NIT(31)      -> Company, name=[razón social], check_digit=calcular_dv_nit(ident).
+    Mismos defaults/estructura que build_customer_from_row (que NO se modifica).
+    La PII (tel/correo/dirección) vive SOLO en este dict que viaja al request de Siigo."""
+    identificacion = _clean_id(ident)
+    tel = _clean_phone(telefono)
+    email = _clean_text(correo)
+    dire = _clean_text(direccion) or "No especificado"
+    addr = {
+        "address": dire,
+        "city": {"country_code": "CO", "state_code": str(state_code).zfill(2), "city_code": str(city_code).zfill(5)},
+    }
+
+    if str(tipo_id) == "31":  # NIT -> Company
+        rs = _clean_text(razon_social)
+        return {
+            "type": "Customer",
+            "person_type": "Company",
+            "id_type": "31",
+            "identification": identificacion,
+            "check_digit": str(calcular_dv_nit(identificacion)),
+            "name": [rs],
+            "address": addr,
+            "phones": [{"number": tel}],
+            "contacts": [{"first_name": rs, "last_name": rs, "email": email}],
+        }
+
+    # CC(13) / CE(22) -> Person
+    nom = _clean_text(nombres)
+    ape = _clean_text(apellidos)
+    return {
+        "type": "Customer",
+        "person_type": "Person",
+        "id_type": str(tipo_id),
+        "identification": identificacion,
+        "name": [nom, ape],
+        "address": addr,
+        "phones": [{"number": tel}],
+        "contacts": [{"first_name": nom, "last_name": ape, "email": email}],
+    }
+
+
 
 
 
@@ -2302,20 +2512,7 @@ IVA_19_ID = 8368
 
 
 
-OBSERVACIONES_POR_CASILLERO = {
-    "9680": (
-        "Esta factura corresponde a compras realizadas, por medio de J&L Suministros. Los cuales ya se encuentran pagos."
-    ),
-    "13608": (
-        "Esta factura corresponde a pedidos realizados, por medio de NEWTEC SAS / DATEC SAS. Los cuales ya se encuentran pagos."
-    ),
-    "1633": (
-        "Esta factura corresponde a pedidos realizados, por medio de INJ personal shopper. Los cuales ya se encuentran pagos."
-    ),
-    "1444": (
-        "Esta factura corresponde a compras o envíos realizados, por medio de @mariapazshop Tienda de Instagram. Los cuales ya se encuentran pagos"
-    ),
-}
+# OBSERVACIONES_POR_CASILLERO se define ARRIBA (única fuente de verdad, antes del gate).
 
 
 
@@ -2393,7 +2590,9 @@ def build_invoice_from_row(
     TERCERO_INGRESO_IDENT = "831412937"  # NIT de Largo Easy Corp
 
     # 6) Observaciones con referencia al ID_INGRESO (solo como texto)
-    obs = OBSERVACIONES_POR_CASILLERO[str(casillero_actual)]
+    obs = OBSERVACIONES_POR_CASILLERO.get(str(casillero_actual))
+    if obs is None:
+        raise ValueError(f"Casillero {casillero_actual} sin facturación habilitada")
 
     # 7) Construcción del payload para Siigo
     invoice_data = {
@@ -2486,8 +2685,8 @@ def run_facturacion_masiva(
     else:
         df_ing_pend["Id_cliente"] = ""
 
-    # Normalizar identificación en clientes
-    COL_ID = "Identificación (Obligatorio)"
+    # Normalizar identificación en clientes (acepta esquema maestro o legacy)
+    COL_ID = col_ident(df_clientes) if df_clientes is not None else "Identificacion"
     if df_clientes is not None and not df_clientes.empty and COL_ID in df_clientes.columns:
         df_clientes[COL_ID] = df_clientes[COL_ID].apply(_clean_id)
 
@@ -2599,11 +2798,16 @@ def run_facturacion_masiva(
 
             cli_row = cli_idx.get(ident)
             if cli_row is None:
-                msg = f"Cliente {ident} no está en la base de Clientes del casillero."
-                st.warning(msg)
-                log_invoice_error(id_ingreso, msg)
-                err_count += 1
-                continue
+                # TAREA 3: no está en el maestro -> buscarlo en Siigo (mismo token del scope, sin re-autenticar)
+                _cust = get_customer_siigo(token, ident)
+                if _cust is None:
+                    msg = f"Cliente {ident} no existe en Siigo — crearlo desde el formulario."
+                    st.warning(msg)
+                    log_invoice_error(id_ingreso, msg)
+                    err_count += 1
+                    continue
+                # existe en Siigo -> agregar al maestro y facturar igual (verify_customer dará True abajo)
+                append_cliente_maestro(_cust["identification"], _cust["name"], _cust.get("id_type") or "13")
 
             # 3) Verificar/crear cliente
             exists = verify_customer(token, ident)
@@ -2832,6 +3036,97 @@ def run_facturacion_masiva(
 
 
 
+
+
+# ============================ ➕ CREAR CLIENTE NUEVO (directo en Siigo) ============================
+# TAREA 1/3/4. Verify-first. REGLA DURA DE PII: teléfono/correo/dirección SOLO viajan en el request
+# a Siigo — se leen de widgets SIN key (no quedan bajo un nombre en session_state) y NUNCA se
+# escriben a Excel, logs ni session_state. Al maestro solo va documento + nombre.
+_TIPO_ID_OPCIONES = {"CC — Cédula": "13", "CE — Cédula de extranjería": "22", "NIT — Empresa": "31"}
+
+
+def _crear_cliente_submit(tipo_id, ident, nombres, apellidos, razon,
+                          telefono, correo, state_code, city_code, direccion):
+    ident_c = _clean_id(ident)
+    nombre_capturado = _clean_text(razon) if tipo_id == "31" else \
+        (f"{_clean_text(nombres)} {_clean_text(apellidos)}").strip()
+
+    if not ident_c:
+        st.error("Identificación vacía."); return
+    if tipo_id == "31" and not nombre_capturado:
+        st.error("Razón social obligatoria."); return
+    if tipo_id != "31" and not (_clean_text(nombres) and _clean_text(apellidos)):
+        st.error("Nombres y apellidos obligatorios."); return
+
+    # a) token
+    token = obtain_token()
+    if not token:
+        st.error("No se pudo autenticar con Siigo. Intenta de nuevo."); return
+
+    # b) verify-first (SOLO con la identificación)
+    if verify_customer(token, ident_c):
+        append_cliente_maestro(ident_c, nombre_capturado, tipo_id)  # limpia caché de clientes
+        st.info("El cliente ya existía en Siigo; se agregó a la base local (maestro).")
+        return
+
+    # validaciones de PII SOLO al crear
+    if not re.match(r"^\d{7,10}$", _clean_phone(telefono) or ""):
+        st.error("Teléfono inválido (7 a 10 dígitos)."); return
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", _clean_text(correo)):
+        st.error("Correo electrónico inválido."); return
+    if not state_code or not city_code:
+        st.error("Selecciona departamento y municipio."); return
+
+    # c) crear en Siigo
+    payload = build_customer_manual(tipo_id, ident_c, nombres, apellidos, razon,
+                                    telefono, correo, state_code, city_code, direccion)
+    ok, resp = create_customer_siigo(token, payload)
+    del payload  # no retener el payload (con PII) más de lo necesario
+    if ok:
+        append_cliente_maestro(ident_c, nombre_capturado, tipo_id)  # doc+nombre al maestro + limpia caché
+        st.success(f"✅ Cliente {ident_c} creado en Siigo y agregado a la base local.")
+    else:
+        st.error(f"❌ Siigo rechazó la creación: {resp}")  # detalle de Siigo, SIN el payload
+
+
+def _crear_cliente_form():
+    tipo_label = st.selectbox("Tipo de identificación", list(_TIPO_ID_OPCIONES.keys()), key="cc_tipo")
+    tipo_id = _TIPO_ID_OPCIONES[tipo_label]
+
+    if tipo_id == "31":
+        st.caption("NIT: escribe el número **sin** el dígito de verificación (se calcula solo).")
+    ident = st.text_input("Identificación", key="cc_ident")
+
+    nombres = apellidos = razon = ""
+    if tipo_id == "31":
+        razon = st.text_input("Razón social", key="cc_razon")
+    else:
+        ca, cb = st.columns(2)
+        nombres = ca.text_input("Nombres", key="cc_nom")
+        apellidos = cb.text_input("Apellidos", key="cc_ape")
+
+    # ⚠️ PII: text_input SIN key -> no queda bajo un nombre persistente en session_state.
+    telefono = st.text_input("Teléfono (7-10 dígitos)")
+    correo = st.text_input("Correo electrónico")
+    state_code, city_code = selector_divipola("crear_cliente")
+    direccion = st.text_input("Dirección (opcional)", placeholder="No especificado")
+
+    if st.button("Crear cliente en Siigo", use_container_width=True):
+        _crear_cliente_submit(tipo_id, ident, nombres, apellidos, razon,
+                              telefono, correo, state_code, city_code, direccion)
+
+
+st.divider()
+st.subheader("➕ Crear cliente nuevo (directo en Siigo)")
+if hasattr(st, "dialog"):
+    @st.dialog("➕ Crear cliente nuevo")
+    def _crear_cliente_dialog():
+        _crear_cliente_form()
+    if st.button("➕ Crear cliente nuevo", key="cc_open", use_container_width=True):
+        _crear_cliente_dialog()
+else:
+    with st.expander("➕ Crear cliente nuevo"):
+        _crear_cliente_form()
 
 
 st.subheader("2️⃣ Ejecutar facturación automática en Siigo")
