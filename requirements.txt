@@ -1,8 +1,13 @@
+# Dashboard Mayoristas — dependencias PINEADAS y coherentes para Python 3.13 (Streamlit Cloud).
+# Todas las versiones tienen wheel binario cp313/manylinux (no compilan en el build) y son
+# mutuamente compatibles. Pinear evita que cada reboot resuelva "latest" y aparezcan
+# incompatibilidades binarias entre extensiones C (causa del Segmentation fault).
 streamlit==1.45.1
-pandas==2.2.3
-matplotlib
+numpy==2.3.5
+pandas==2.3.3
+pyarrow==21.0.0
+matplotlib==3.10.9
 openpyxl==3.1.5
-dropbox
-numpy
-requests
-anthropic
+dropbox==12.1.0
+requests==2.34.2
+anthropic==0.116.0
