@@ -786,7 +786,21 @@ if sheet_name == ADMIN_SHEET:
 
     st.stop()
 
-df = load_data(sheet_name)
+try:
+    df = load_data(sheet_name)
+except Exception as e:
+    # 🆕 Casillero recién dado de alta cuya hoja aún no existe en el histórico (todavía
+    #    no tiene movimientos cargados): NO reventar la app. Mostramos un tablero vacío
+    #    amable. En cuanto el generador cree su hoja (al registrarse su primera
+    #    operación), este guard deja de activarse y el tablero carga normal.
+    if "Worksheet named" in str(e) and "not found" in str(e):
+        st.title("📊 Dashboard Mayoristas")
+        st.info(
+            "👋 Tu tablero aún no tiene movimientos cargados. "
+            "Aparecerá aquí en cuanto se registre tu primera operación en el histórico."
+        )
+        st.stop()
+    raise
 
 # 🗂️ Mapeo hoja → casillero para cargar IngresosConID en segundo plano
 SHEET_TO_CAS = {
