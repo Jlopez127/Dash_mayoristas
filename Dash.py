@@ -72,6 +72,18 @@ def load_data(sheet_name: str) -> pd.DataFrame:
         if 'Fecha de Carga' not in df.columns and 'Fecha' in df.columns:
             df['Fecha de Carga'] = df['Fecha']  # usar Fecha como Fecha de Carga
     
+    # 📦💱 Peso y TRM del ENVÍO, tal como llegan del archivo de envíos al histórico.
+    # Se copian a columnas propias ANTES de las dos transformaciones de abajo, que las
+    # harían inservibles para la tabla de egresos:
+    #   · el drop de 'TRM' en las hojas que no son de 1444, y
+    #   · el +100 que se le suma a la TRM de 1444 (regla legacy: sus INGRESOS vienen en USD
+    #     y se convierten a COP con TRM+100). Ese +100 no aplica a los envíos, cuyo Monto ya
+    #     viene en COP calculado con la TRM cruda; mostrarlo sumado no cuadraría.
+    if 'TRM' in df.columns:
+        df['TRM_envio'] = pd.to_numeric(df['TRM'], errors='coerce')
+    if 'Peso_lb' in df.columns:
+        df['Peso_lb'] = pd.to_numeric(df['Peso_lb'], errors='coerce')
+
     if sheet_name != "1444 - Maria Moises" and sheet_name != "1444 - Maria Moises COP":
         df = df.drop(columns=['TRM'], errors='ignore')
 
@@ -1153,7 +1165,25 @@ else:
 # 8.2️⃣ Compras realizadas (Egresos) (tabla)
 # 8.2️⃣ Compras realizadas (Egresos)
 st.markdown("<h3 style='text-align:center;'>3️⃣ Compras realizadas (Egresos)</h3>", unsafe_allow_html=True)
-df_eg = df.loc[df['Tipo'] == 'Egreso', ['Fecha','Orden','Monto','Nombre del producto']].copy()
+_mask_eg = df['Tipo'] == 'Egreso'
+df_eg = df.loc[_mask_eg, ['Fecha','Orden','Monto','Nombre del producto']].copy()
+
+# 📦💱 Peso y TRM del ENVÍO. Se leen SOLO en las filas de Motivo 'Envio': en los demás
+# egresos la columna TRM del histórico guarda la TRM de ESA compra (tarjetas, compras
+# legacy), que no tiene nada que ver con un envío, así que se enmascara. Cada columna se
+# agrega únicamente si esta hoja tiene al menos un envío con el dato, para no dejar
+# columnas vacías en los casilleros que todavía no lo traen; se van llenando solas a
+# medida que corren los cargues con el archivo de envíos nuevo (que ya emite PESO y TRM).
+if 'Motivo' in df.columns:
+    _es_envio = df['Motivo'].astype(str).str.strip().str.casefold().eq('envio')
+else:
+    _es_envio = pd.Series(False, index=df.index)
+
+for _col in ('Peso_lb', 'TRM_envio'):
+    if _col in df.columns:
+        _vals = df.loc[_mask_eg, _col].where(_es_envio.loc[_mask_eg])
+        if _vals.notna().any():
+            df_eg[_col] = _vals
 
 if df_eg.empty:
     st.info("Aún no hay compras registradas.")
@@ -1166,11 +1196,19 @@ else:
     # === Preparar exportación (sin formatos de pantalla) ===
     df_eg_export = df_eg.copy()
     df_eg_export['Fecha'] = df_eg_export['Fecha'].dt.date  # fecha limpia para Excel
+    df_eg_export = df_eg_export.rename(columns={'Peso_lb': 'Peso (lb)', 'TRM_envio': 'TRM'})
 
     # === Mostrar tabla formateada en UI ===
     df_eg['Fecha'] = df_eg['Fecha'].dt.strftime('%Y-%m-%d')
     df_eg['Monto'] = df_eg['Monto'].map(lambda x: f"${x:,.0f}")
-    st.dataframe(df_eg, use_container_width=True)
+    if 'Peso_lb' in df_eg.columns:
+        df_eg['Peso_lb'] = df_eg['Peso_lb'].map(lambda x: '' if pd.isna(x) else f"{x:,.2f}")
+    if 'TRM_envio' in df_eg.columns:
+        df_eg['TRM_envio'] = df_eg['TRM_envio'].map(lambda x: '' if pd.isna(x) else f"${x:,.2f}")
+    st.dataframe(
+        df_eg.rename(columns={'Peso_lb': 'Peso (lb)', 'TRM_envio': 'TRM'}),
+        use_container_width=True
+    )
 
     # === Botón de descarga compacto y centrado ===
     buf_eg = io.BytesIO()
@@ -1193,7 +1231,9 @@ st.markdown("<h3 style='text-align:center;'>🧾 Consolidado (Ingresos + Egresos
 
 # Copias para consolidado (pueden venir ya formateadas para UI)
 df_in_c = df_in.copy()
-df_eg_c = df_eg.copy()
+# El consolidado se deja como estaba: peso y TRM son propios del envío y no tienen
+# equivalente del lado de los ingresos, así que solo aportarían columnas vacías.
+df_eg_c = df_eg.drop(columns=['Peso_lb', 'TRM_envio', 'Peso (lb)', 'TRM'], errors='ignore').copy()
 
 df_in_c['Tipo'] = 'Ingreso'
 
