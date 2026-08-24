@@ -1168,22 +1168,24 @@ st.markdown("<h3 style='text-align:center;'>3️⃣ Compras realizadas (Egresos)
 _mask_eg = df['Tipo'] == 'Egreso'
 df_eg = df.loc[_mask_eg, ['Fecha','Orden','Monto','Nombre del producto']].copy()
 
-# 📦💱 Peso y TRM del ENVÍO. Se leen SOLO en las filas de Motivo 'Envio': en los demás
-# egresos la columna TRM del histórico guarda la TRM de ESA compra (tarjetas, compras
-# legacy), que no tiene nada que ver con un envío, así que se enmascara. Cada columna se
-# agrega únicamente si esta hoja tiene al menos un envío con el dato, para no dejar
-# columnas vacías en los casilleros que todavía no lo traen; se van llenando solas a
-# medida que corren los cargues con el archivo de envíos nuevo (que ya emite PESO y TRM).
-if 'Motivo' in df.columns:
-    _es_envio = df['Motivo'].astype(str).str.strip().str.casefold().eq('envio')
-else:
-    _es_envio = pd.Series(False, index=df.index)
+# 📦💱 Peso y TRM del ENVÍO — SOLO para la hoja de 1444, que es la que tiene tarifa por
+# peso y donde el dato sirve para validar el cobro. En los demás casilleros estas columnas
+# NO se muestran (mismo criterio que la TRM de la tabla de ingresos, más arriba).
+# Dentro de 1444 se leen solo en filas de Motivo 'Envio': en los demás egresos la columna
+# TRM del histórico guarda la TRM de ESA compra (tarjetas, compras legacy), que no tiene
+# nada que ver con un envío. Cada columna se agrega únicamente si hay al menos un envío
+# con el dato.
+if sheet_name == "1444 - Maria Moises":
+    if 'Motivo' in df.columns:
+        _es_envio = df['Motivo'].astype(str).str.strip().str.casefold().eq('envio')
+    else:
+        _es_envio = pd.Series(False, index=df.index)
 
-for _col in ('Peso_lb', 'TRM_envio'):
-    if _col in df.columns:
-        _vals = df.loc[_mask_eg, _col].where(_es_envio.loc[_mask_eg])
-        if _vals.notna().any():
-            df_eg[_col] = _vals
+    for _col in ('Peso_lb', 'TRM_envio'):
+        if _col in df.columns:
+            _vals = df.loc[_mask_eg, _col].where(_es_envio.loc[_mask_eg])
+            if _vals.notna().any():
+                df_eg[_col] = _vals
 
 if df_eg.empty:
     st.info("Aún no hay compras registradas.")
