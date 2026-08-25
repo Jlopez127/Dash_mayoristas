@@ -1114,9 +1114,9 @@ else:
     df_in['Fecha'] = pd.to_datetime(df_in['Fecha'], errors='coerce')
     df_in['Monto'] = pd.to_numeric(df_in['Monto'], errors='coerce')
 
-    # 👉 Solo Maria Moises: agregar columna Monto COP
-    if sheet_name == "1444 - Maria Moises" and 'TRM' in df_in.columns:
-        df_in['Monto COP'] = df_in['Monto'] * df_in['TRM']
+    # 🗑️ 'Monto COP' RETIRADA (2026-08-25). Hacía `Monto * TRM` porque en su momento los
+    # ingresos de 1444 venían en USD. Hoy el Monto YA está en COP, así que multiplicarlo por la
+    # TRM daba una cifra sin significado (COP × TRM). 'Monto' se queda tal cual.
 
     df_in = df_in[df_in['Monto'].notna() & df_in['Monto'].ne(0)]
 
@@ -1142,8 +1142,6 @@ else:
     # === Mostrar formateado ===
     df_in['Fecha'] = pd.to_datetime(df_in['Fecha'], errors='coerce').dt.strftime('%Y-%m-%d')
     df_in['Monto'] = pd.to_numeric(df_in['Monto'], errors='coerce').map(lambda x: f"${x:,.0f}")
-    if 'Monto COP' in df_in.columns:
-        df_in['Monto COP'] = pd.to_numeric(df_in['Monto COP'], errors='coerce').map(lambda x: f"${x:,.0f}")
     st.dataframe(df_in, use_container_width=True)
 
     # === Botón descarga ===
