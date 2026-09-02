@@ -48,6 +48,10 @@ como TRM de un envío.
 La tabla en pantalla, el **Excel de descarga** y el **Consolidado**. Una columna añadida a
 cualquiera de los dos aparece en los tres. Decidir a propósito en cuáles debe verse.
 
+Decisiones vigentes en `df_eg`: `Peso (lb)`, `TRM` y **`Fecha de Carga`** se ven en pantalla y
+en el Excel de egresos, pero se **retiran del Consolidado** (del lado de los ingresos quedarían
+vacías). El retiro se hace en el `drop` de `df_eg_c`.
+
 ---
 
 ## Dónde está cada cosa

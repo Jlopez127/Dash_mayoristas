@@ -1164,7 +1164,15 @@ else:
 # 8.2️⃣ Compras realizadas (Egresos)
 st.markdown("<h3 style='text-align:center;'>3️⃣ Compras realizadas (Egresos)</h3>", unsafe_allow_html=True)
 _mask_eg = df['Tipo'] == 'Egreso'
-df_eg = df.loc[_mask_eg, ['Fecha','Orden','Monto','Nombre del producto']].copy()
+# 🗓️ 'Fecha de Carga' va JUNTO a 'Fecha' a propósito: 'Fecha' es cuándo ocurrió el movimiento
+# y 'Fecha de Carga' cuándo entró al histórico. Los dos datos juntos explican el caso que la
+# motivó (2026-09-02): a 1444 le entraron de golpe 16 compras Intuit del 26 al 29 de agosto y
+# el mayorista no ubicaba de dónde salía el cobro. Con las dos columnas puede decir "me
+# bajaron X y fue por estos movimientos, cargados tal día". NO se toca 'Fecha'.
+_cols_eg = ['Fecha', 'Orden', 'Monto', 'Nombre del producto']
+if 'Fecha de Carga' in df.columns:
+    _cols_eg.insert(1, 'Fecha de Carga')
+df_eg = df.loc[_mask_eg, _cols_eg].copy()
 
 # 📦💱 Peso y TRM del ENVÍO — SOLO para la hoja de 1444, que es la que tiene tarifa por
 # peso y donde el dato sirve para validar el cobro. En los demás casilleros estas columnas
@@ -1188,18 +1196,24 @@ if sheet_name == "1444 - Maria Moises":
 if df_eg.empty:
     st.info("Aún no hay compras registradas.")
 else:
-    # Tipos y ordenamiento
+    # Tipos y ordenamiento (el orden sigue siendo por 'Fecha', la del movimiento)
     df_eg['Fecha'] = pd.to_datetime(df_eg['Fecha'], errors='coerce')
+    if 'Fecha de Carga' in df_eg.columns:
+        df_eg['Fecha de Carga'] = pd.to_datetime(df_eg['Fecha de Carga'], errors='coerce')
     df_eg['Monto'] = pd.to_numeric(df_eg['Monto'], errors='coerce')
     df_eg = df_eg.sort_values('Fecha', ascending=False, na_position='last')
 
     # === Preparar exportación (sin formatos de pantalla) ===
     df_eg_export = df_eg.copy()
     df_eg_export['Fecha'] = df_eg_export['Fecha'].dt.date  # fecha limpia para Excel
+    if 'Fecha de Carga' in df_eg_export.columns:
+        df_eg_export['Fecha de Carga'] = df_eg_export['Fecha de Carga'].dt.date
     df_eg_export = df_eg_export.rename(columns={'Peso_lb': 'Peso (lb)', 'TRM_envio': 'TRM'})
 
     # === Mostrar tabla formateada en UI ===
     df_eg['Fecha'] = df_eg['Fecha'].dt.strftime('%Y-%m-%d')
+    if 'Fecha de Carga' in df_eg.columns:
+        df_eg['Fecha de Carga'] = df_eg['Fecha de Carga'].dt.strftime('%Y-%m-%d')
     df_eg['Monto'] = df_eg['Monto'].map(lambda x: f"${x:,.0f}")
     if 'Peso_lb' in df_eg.columns:
         df_eg['Peso_lb'] = df_eg['Peso_lb'].map(lambda x: '' if pd.isna(x) else f"{x:,.2f}")
@@ -1231,9 +1245,12 @@ st.markdown("<h3 style='text-align:center;'>🧾 Consolidado (Ingresos + Egresos
 
 # Copias para consolidado (pueden venir ya formateadas para UI)
 df_in_c = df_in.copy()
-# El consolidado se deja como estaba: peso y TRM son propios del envío y no tienen
-# equivalente del lado de los ingresos, así que solo aportarían columnas vacías.
-df_eg_c = df_eg.drop(columns=['Peso_lb', 'TRM_envio', 'Peso (lb)', 'TRM'], errors='ignore').copy()
+# El consolidado se deja como estaba: peso, TRM y 'Fecha de Carga' se agregaron SOLO a la
+# tabla de egresos (pantalla + Excel de egresos). Aquí se retiran a propósito porque del lado
+# de los ingresos quedarían vacías. Si algún día se quiere en el consolidado, hay que añadirla
+# también a df_in, no dejar de retirarla aquí.
+df_eg_c = df_eg.drop(columns=['Peso_lb', 'TRM_envio', 'Peso (lb)', 'TRM', 'Fecha de Carga'],
+                     errors='ignore').copy()
 
 df_in_c['Tipo'] = 'Ingreso'
 
