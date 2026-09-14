@@ -1193,6 +1193,27 @@ if sheet_name == "1444 - Maria Moises":
             if _vals.notna().any():
                 df_eg[_col] = _vals
 
+# 💵 USD de las COMPRAS CON TARJETA — solo en esas filas.
+# El mayorista gasta en USD y se le cobra en COP; ver el USD al lado del Monto le permite
+# reconocer la compra contra su propio recibo, que está en dólares.
+#   · Se limita por 'Motivo': solo las tarjetas y los movimientos de migración Amex. Los demás
+#     egresos (envíos, compras legacy, comisiones) NO llevan USD: su Monto no nace de un
+#     importe en dólares, y la columna TRM del histórico significa otra cosa en cada caso.
+#   · ⚠️ Se divide por 'TRM_envio', NO por 'TRM': en la hoja de 1444 'TRM' trae el +100 legacy
+#     (regla de cuando sus INGRESOS venían en USD) y daría un USD más bajo que el real.
+#     'TRM_envio' es el valor crudo del histórico, que es el que se usó para cobrar.
+#   · La columna se agrega solo si hay al menos una compra con tarjeta y TRM legible, así que
+#     en los casilleros sin tarjeta no aparece — no hace falta gatear por 'sheet_name'.
+_MOTIVOS_TC = {'tarjeta amex', 'tarjeta rakuten', 'tarjeta robinhood', 'tarjeta capital',
+               'tarjeta us bank', 'tarjeta intuit', 'tarjeta apple pay', 'migracion amex'}
+if 'Motivo' in df.columns and 'TRM_envio' in df.columns:
+    _es_tc = df['Motivo'].astype(str).str.strip().str.casefold().isin(_MOTIVOS_TC)
+    _trm_tc = pd.to_numeric(df.loc[_mask_eg, 'TRM_envio'], errors='coerce')
+    _trm_tc = _trm_tc.where(_es_tc.loc[_mask_eg] & _trm_tc.gt(0))
+    _usd_tc = pd.to_numeric(df.loc[_mask_eg, 'Monto'], errors='coerce') / _trm_tc
+    if _usd_tc.notna().any():
+        df_eg['USD'] = _usd_tc
+
 if df_eg.empty:
     st.info("Aún no hay compras registradas.")
 else:
@@ -1219,6 +1240,8 @@ else:
         df_eg['Peso_lb'] = df_eg['Peso_lb'].map(lambda x: '' if pd.isna(x) else f"{x:,.2f}")
     if 'TRM_envio' in df_eg.columns:
         df_eg['TRM_envio'] = df_eg['TRM_envio'].map(lambda x: '' if pd.isna(x) else f"${x:,.2f}")
+    if 'USD' in df_eg.columns:
+        df_eg['USD'] = df_eg['USD'].map(lambda x: '' if pd.isna(x) else f"US${x:,.2f}")
     st.dataframe(
         df_eg.rename(columns={'Peso_lb': 'Peso (lb)', 'TRM_envio': 'TRM'}),
         use_container_width=True
@@ -1249,7 +1272,8 @@ df_in_c = df_in.copy()
 # tabla de egresos (pantalla + Excel de egresos). Aquí se retiran a propósito porque del lado
 # de los ingresos quedarían vacías. Si algún día se quiere en el consolidado, hay que añadirla
 # también a df_in, no dejar de retirarla aquí.
-df_eg_c = df_eg.drop(columns=['Peso_lb', 'TRM_envio', 'Peso (lb)', 'TRM', 'Fecha de Carga'],
+df_eg_c = df_eg.drop(columns=['Peso_lb', 'TRM_envio', 'Peso (lb)', 'TRM', 'Fecha de Carga',
+                              'USD'],
                      errors='ignore').copy()
 
 df_in_c['Tipo'] = 'Ingreso'
