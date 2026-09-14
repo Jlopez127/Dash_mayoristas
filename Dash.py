@@ -1205,7 +1205,8 @@ if sheet_name == "1444 - Maria Moises":
 #   · La columna se agrega solo si hay al menos una compra con tarjeta y TRM legible, así que
 #     en los casilleros sin tarjeta no aparece — no hace falta gatear por 'sheet_name'.
 _MOTIVOS_TC = {'tarjeta amex', 'tarjeta rakuten', 'tarjeta robinhood', 'tarjeta capital',
-               'tarjeta us bank', 'tarjeta intuit', 'tarjeta apple pay', 'migracion amex'}
+               'tarjeta us bank', 'tarjeta intuit', 'tarjeta apple pay', 'tarjeta discover',
+               'migracion amex'}
 if 'Motivo' in df.columns and 'TRM_envio' in df.columns:
     _es_tc = df['Motivo'].astype(str).str.strip().str.casefold().isin(_MOTIVOS_TC)
     _trm_tc = pd.to_numeric(df.loc[_mask_eg, 'TRM_envio'], errors='coerce')
