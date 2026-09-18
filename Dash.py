@@ -1265,6 +1265,128 @@ else:
         )
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# 🧮 COMISIÓN QUINCENAL — tabla informativa (solo los casilleros a los que se les cobra).
+#
+# La comisión la calcula el generador (Mayoristas_app) así: 1,5% del DÍA MÁS NEGATIVO de la
+# quincena. Aquí NO se recalcula ni se escribe nada: se muestra de dónde salió cada una, que es
+# justo lo que el mayorista no puede deducir mirando sus movimientos.
+#
+#   · Las quincenas CERRADAS muestran la comisión tal como está en el histórico. Puede no ser
+#     exactamente el 1,5% del mínimo de hoy: la fila se congela al crearse, así que si después
+#     entró un movimiento con fecha dentro de esa quincena, el mínimo bajó y la comisión no se
+#     recalculó. Por eso se muestra lo COBRADO, no un recálculo.
+#   · La quincena EN CURSO va con la comisión VACÍA (todavía no existe) pero SÍ con el peor día
+#     hasta hoy, que es lo que el mayorista necesita para anticiparla. Ese mínimo solo empeora:
+#     si hoy el peor día son -1.000 y mañana el saldo es -500, sigue mandando el -1.000.
+#
+# Se gatea sola: si la hoja no tiene ninguna fila "Comision de (...)" no se muestra nada, así
+# que los casilleros sin comisión (todos menos 1444 y 9444) ni se enteran.
+# ──────────────────────────────────────────────────────────────────────────────
+_COMISION_PCT = 0.015
+
+# Se relee el histórico COMPLETO (load_data está cacheado): los TOTAL necesarios para el mínimo
+# de una quincena pueden quedar fuera del filtro de 'Fecha de Carga' del sidebar.
+_df_full = load_data(sheet_name)
+_com = _df_full[_df_full['Nombre del producto'].astype(str).str.strip().str.lower()
+                .str.startswith('comision de (')].copy()
+
+if not _com.empty:
+    _MESES_ES = {'enero': 1, 'febrero': 2, 'marzo': 3, 'abril': 4, 'mayo': 5, 'junio': 6,
+                 'julio': 7, 'agosto': 8, 'septiembre': 9, 'octubre': 10, 'noviembre': 11,
+                 'diciembre': 12}
+
+    def _quincena_rango(etiqueta: str):
+        """('1-15 septiembre 2026') -> (inicio, fin) como Timestamp. None si no se puede leer."""
+        m = re.match(r'\s*(1-15|16-fin)\s+(\w+)\s+(\d{4})\s*$', str(etiqueta).strip(), re.I)
+        if not m:
+            return None
+        tramo, mes_txt, anio = m.group(1).lower(), m.group(2).lower(), int(m.group(3))
+        mes = _MESES_ES.get(mes_txt)
+        if not mes:
+            return None
+        if tramo == '1-15':
+            return pd.Timestamp(anio, mes, 1), pd.Timestamp(anio, mes, 15)
+        return (pd.Timestamp(anio, mes, 16),
+                pd.Timestamp(anio, mes, 1) + pd.offsets.MonthEnd(0))
+
+    # Totales diarios del histórico completo (es donde vive el saldo de cada día).
+    _tot = _df_full[_df_full['Tipo'].astype(str).str.strip().str.upper() == 'TOTAL'].copy()
+    _tot['_f'] = pd.to_datetime(_tot['Fecha'], errors='coerce')
+    _tot['_m'] = pd.to_numeric(_tot['Monto'], errors='coerce')
+    _tot = _tot.dropna(subset=['_f', '_m'])
+
+    def _peor_dia(ini, fin):
+        """(fecha, monto) del día MÁS NEGATIVO del rango; (None, None) si no hay totales."""
+        v = _tot[(_tot['_f'] >= ini) & (_tot['_f'] <= fin)]
+        if v.empty:
+            return None, None
+        i = v['_m'].idxmin()
+        return v.loc[i, '_f'], float(v.loc[i, '_m'])
+
+    _filas = []
+    _com['_f'] = pd.to_datetime(_com['Fecha'], errors='coerce')
+    for _, _r in _com.sort_values('_f').iterrows():
+        _et = re.search(r'\((.+)\)', str(_r['Nombre del producto']))
+        if not _et:
+            continue
+        _rg = _quincena_rango(_et.group(1))
+        if not _rg:
+            continue
+        _d, _mn = _peor_dia(*_rg)
+        _filas.append({
+            'Quincena': _et.group(1),
+            'Día más negativo': _d.strftime('%Y-%m-%d') if _d is not None else '—',
+            'Saldo ese día': f"${_mn:,.0f}" if _mn is not None else '—',
+            'Comisión': f"${float(pd.to_numeric(_r['Monto'], errors='coerce')):,.0f}",
+        })
+
+    # ── Quincena EN CURSO: la que contiene HOY, si aún no tiene comisión ──
+    _hoy = pd.Timestamp.today().normalize()
+    if _hoy.day <= 15:
+        _ini_c, _fin_c = pd.Timestamp(_hoy.year, _hoy.month, 1), pd.Timestamp(_hoy.year, _hoy.month, 15)
+        _tramo_c = '1-15'
+    else:
+        _ini_c = pd.Timestamp(_hoy.year, _hoy.month, 16)
+        _fin_c = pd.Timestamp(_hoy.year, _hoy.month, 1) + pd.offsets.MonthEnd(0)
+        _tramo_c = '16-fin'
+    _mes_c = [k for k, v in _MESES_ES.items() if v == _hoy.month][0]
+    _et_c = f"{_tramo_c} {_mes_c} {_hoy.year}"
+
+    if not any(f['Quincena'].strip().lower() == _et_c for f in _filas):
+        # el peor día se mide SOLO hasta hoy: los días que aún no ocurren no cuentan
+        _d_c, _mn_c = _peor_dia(_ini_c, min(_fin_c, _hoy))
+        if _mn_c is not None and _mn_c < 0:
+            _detalle, _saldo_c = _d_c.strftime('%Y-%m-%d'), f"${_mn_c:,.0f}"
+        else:
+            _detalle, _saldo_c = 'sin días negativos', '—'
+        _filas.append({'Quincena': f"{_et_c}  (en curso)", 'Día más negativo': _detalle,
+                       'Saldo ese día': _saldo_c, 'Comisión': ''})
+
+    if _filas:
+        st.markdown("<h3 style='text-align:center;'>🧮 Comisión quincenal</h3>",
+                    unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame(_filas), use_container_width=True, hide_index=True)
+        st.caption(
+            f"La comisión es el **{_COMISION_PCT*100:.1f}% del saldo del día más negativo** de "
+            f"cada quincena. Un solo día en rojo la define: los demás días no suman."
+        )
+        _ult = _filas[-1]
+        if _ult['Comisión'] == '':
+            if _ult['Saldo ese día'] == '—':
+                st.caption("🟢 La quincena en curso **no ha tenido ningún día en negativo**, así "
+                           "que por ahora no generaría comisión.")
+            else:
+                _est = abs(_mn_c) * _COMISION_PCT
+                st.caption(
+                    f"⏳ La quincena en curso **aún no tiene comisión**: se calcula al cerrarla. "
+                    f"Con el peor día hasta hoy ({_ult['Día más negativo']}, "
+                    f"{_ult['Saldo ese día']}) iría en **${_est:,.0f}**. Ese mínimo solo puede "
+                    f"empeorar: si más adelante hay un día peor, la comisión sube; si el saldo "
+                    f"mejora, se queda como está."
+                )
+
+
 st.markdown("<h3 style='text-align:center;'>🧾 Consolidado (Ingresos + Egresos)</h3>", unsafe_allow_html=True)
 
 # Copias para consolidado (pueden venir ya formateadas para UI)
