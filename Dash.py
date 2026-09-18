@@ -1284,6 +1284,11 @@ else:
 # que los casilleros sin comisión (todos menos 1444 y 9444) ni se enteran.
 # ──────────────────────────────────────────────────────────────────────────────
 _COMISION_PCT = 0.015
+# 🚦 Desde qué quincena se muestra la tabla (decisión del usuario 2026-09-17): la 2ª de julio.
+# Antes de esa fecha el histórico arrastra saldos que no son deuda real — las dos quincenas de
+# marzo-2026 de 1444 salían con −3.967 millones por el legacy del cambio de USD a COP — y las
+# comisiones viejas ya están liquidadas. Se compara contra el INICIO de la quincena.
+_COMISION_DESDE = pd.Timestamp("2026-07-16")
 
 # Se relee el histórico COMPLETO (load_data está cacheado): los TOTAL necesarios para el mínimo
 # de una quincena pueden quedar fuera del filtro de 'Fecha de Carga' del sidebar.
@@ -1333,14 +1338,9 @@ if not _com.empty:
         _rg = _quincena_rango(_et.group(1))
         if not _rg:
             continue
-        _monto_com = float(pd.to_numeric(_r['Monto'], errors='coerce') or 0)
-        # 🙈 Las quincenas con comisión $0 NO se muestran. Hoy son las dos de marzo-2026 de 1444,
-        # que arrastran el saldo legacy del cambio de USD a COP ("balance a 0 para cambio a cop",
-        # 3.980 millones): saldrían con −3.967 millones en rojo, una cifra alarmante que no es
-        # deuda real y por la que nunca se cobró nada. Si una quincena no generó comisión, no
-        # hay nada que explicarle al mayorista.
-        if abs(_monto_com) < 1:
+        if _rg[0] < _COMISION_DESDE:
             continue
+        _monto_com = float(pd.to_numeric(_r['Monto'], errors='coerce') or 0)
         _d, _mn = _peor_dia(*_rg)
         _filas.append({
             'Quincena': _et.group(1),
