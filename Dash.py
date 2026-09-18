@@ -1333,12 +1333,20 @@ if not _com.empty:
         _rg = _quincena_rango(_et.group(1))
         if not _rg:
             continue
+        _monto_com = float(pd.to_numeric(_r['Monto'], errors='coerce') or 0)
+        # 🙈 Las quincenas con comisión $0 NO se muestran. Hoy son las dos de marzo-2026 de 1444,
+        # que arrastran el saldo legacy del cambio de USD a COP ("balance a 0 para cambio a cop",
+        # 3.980 millones): saldrían con −3.967 millones en rojo, una cifra alarmante que no es
+        # deuda real y por la que nunca se cobró nada. Si una quincena no generó comisión, no
+        # hay nada que explicarle al mayorista.
+        if abs(_monto_com) < 1:
+            continue
         _d, _mn = _peor_dia(*_rg)
         _filas.append({
             'Quincena': _et.group(1),
             'Día más negativo': _d.strftime('%Y-%m-%d') if _d is not None else '—',
             'Saldo ese día': f"${_mn:,.0f}" if _mn is not None else '—',
-            'Comisión': f"${float(pd.to_numeric(_r['Monto'], errors='coerce')):,.0f}",
+            'Comisión': f"${_monto_com:,.0f}",
         })
 
     # ── Quincena EN CURSO: la que contiene HOY, si aún no tiene comisión ──
