@@ -61,10 +61,35 @@ def get_base_folder() -> str:
     return "/".join(remote_path.split("/")[:-1])
 
 
+# ❄️ CONGELAMIENTO TEMPORAL DEL TABLERO (pedido de Julián, lunes 2-nov-2026).
+#    Paula (11591) ve sus saldos congelados lunes-martes-miércoles aunque se carguen cosas al
+#    histórico; desde el JUEVES 5-nov (hora Colombia) el tablero vuelve SOLO a leer el vivo.
+#    Solo cambia QUÉ archivo lee el tablero de esa hoja: el generador sigue escribiendo el vivo.
+#    La foto (copia exacta del vivo del 2-nov 08:26) está en Dropbox <base>/congelado_11591/.
+#    Para quitarlo antes: borrar la entrada de CONGELADOS.
+CONGELADOS = {"11591 - Paula Herrera": ("11591", "2026-11-05")}  # hoja -> (casillero, día en que se descongela)
+
+
+def carpeta_congelada(sheet_name: str) -> str | None:
+    """Carpeta de Dropbox con la foto congelada de la hoja, o None si no está congelada hoy."""
+    c = CONGELADOS.get(sheet_name)
+    if not c:
+        return None
+    hoy_col = (pd.Timestamp.now(tz="UTC").tz_localize(None) - pd.Timedelta(hours=5)).normalize()
+    if hoy_col >= pd.Timestamp(c[1]):
+        return None
+    return f"{get_base_folder()}/congelado_{c[0]}"
+
+
 
 @st.cache_data
-def load_data(sheet_name: str) -> pd.DataFrame:
-    _, res = dbx.files_download(cfg_dbx["remote_path"])
+def load_data(sheet_name: str, congelada: str | None = None) -> pd.DataFrame:
+    # ❄️ 'congelada' (carpeta de la foto) también es parte de la llave del caché: al descongelarse
+    #    cambia el argumento y se relee el vivo sin depender del botón de refresco.
+    ruta = cfg_dbx["remote_path"]
+    if congelada:
+        ruta = f"{congelada}/{cfg_dbx['remote_path'].rstrip('/').split('/')[-1]}"
+    _, res = dbx.files_download(ruta)
     df = pd.read_excel(io.BytesIO(res.content), sheet_name=sheet_name)
 
     # 👇 Caso especial para la hoja COP
@@ -151,7 +176,7 @@ def _format_dd_mm_yyyy_for_bancos(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 @st.cache_data
-def load_ingresos_con_id(casillero: str) -> dict[str, pd.DataFrame]:
+def load_ingresos_con_id(casillero: str, congelada: str | None = None) -> dict[str, pd.DataFrame]:
     """
     Carga desde Dropbox SOLO los archivos de Ingresos y Clientes
     que correspondan al casillero dado.
@@ -191,6 +216,11 @@ def load_ingresos_con_id(casillero: str) -> dict[str, pd.DataFrame]:
         # ¿Es un archivo de ingresos o de clientes del casillero?
         if not (patron_ing.match(name) or patron_cli.match(name)):
             continue
+
+        # ❄️ Hoja congelada: los INGRESOS se leen de la foto (los Clientes, del vivo).
+        #    Un archivo de ingresos que no esté en la foto no se muestra (da None).
+        if congelada and patron_ing.match(name):
+            fullpath = f"{congelada}/{name}"
 
         df = _try_download_excel(fullpath)
         if df is None or df.empty:
@@ -799,7 +829,7 @@ if sheet_name == ADMIN_SHEET:
     st.stop()
 
 try:
-    df = load_data(sheet_name)
+    df = load_data(sheet_name, carpeta_congelada(sheet_name))
 except Exception as e:
     # 🆕 Casillero recién dado de alta cuya hoja aún no existe en el histórico (todavía
     #    no tiene movimientos cargados): NO reventar la app. Mostramos un tablero vacío
@@ -834,7 +864,7 @@ cas_consig = CONSIG_CASILLERO_OVERRIDE.get(password, casillero_actual)
 
 # 🚚 Carga silenciosa de IngresosConID a sesión (sin renderizar)
 if casillero_actual:
-    loaded = load_ingresos_con_id(casillero_actual)  # puede venir cacheado
+    loaded = load_ingresos_con_id(casillero_actual, carpeta_congelada(sheet_name))  # puede venir cacheado
     existing = st.session_state.get("ingresos_id_archivos", {}) or {}
     # Merge: lo que ya esté en sesión (p.ej., Clientes editados) GANA sobre lo cacheado
     merged = {**loaded, **existing}
@@ -1292,7 +1322,7 @@ _COMISION_DESDE = pd.Timestamp("2026-07-16")
 
 # Se relee el histórico COMPLETO (load_data está cacheado): los TOTAL necesarios para el mínimo
 # de una quincena pueden quedar fuera del filtro de 'Fecha de Carga' del sidebar.
-_df_full = load_data(sheet_name)
+_df_full = load_data(sheet_name, carpeta_congelada(sheet_name))
 _com = _df_full[_df_full['Nombre del producto'].astype(str).str.strip().str.lower()
                 .str.startswith('comision de (')].copy()
 
