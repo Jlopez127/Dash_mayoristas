@@ -67,7 +67,7 @@ def get_base_folder() -> str:
 #    Solo cambia QUÉ archivo lee el tablero de esa hoja: el generador sigue escribiendo el vivo.
 #    La foto (copia exacta del vivo del 2-nov 08:26) está en Dropbox <base>/congelado_11591/.
 #    Para quitarlo antes: borrar la entrada de CONGELADOS.
-CONGELADOS = {"11591 - Paula Herrera": ("11591", "2026-11-05")}  # hoja -> (casillero, día en que se descongela)
+CONGELADOS: dict = {}  # hoja -> (casillero, día en que se descongela). Paula se descongeló el 4-nov (pedido de Julián).
 
 
 def carpeta_congelada(sheet_name: str) -> str | None:
