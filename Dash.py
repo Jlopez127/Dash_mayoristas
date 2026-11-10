@@ -1671,6 +1671,178 @@ def casillero_factura(casillero) -> bool:
     return str(casillero) in OBSERVACIONES_POR_CASILLERO
 
 
+def _graficas_finales():
+    """Gráficas 4–7 (saldo, compras, ingresos). En función para mostrarlas también con la facturación congelada."""
+    # ——————————————————————————————
+    # 9) Todas las gráficas al final con numeración corregida
+    # ——————————————————————————————
+
+    # 9.1️⃣ Evolución del saldo reportado (#4)
+    st.header("4️⃣ Evolución del saldo reportado")
+    try:
+        df_tot = df[df['Tipo']=='Total']
+        if df_tot.empty:
+            st.info("Aún no hay movimientos totales para mostrar.")
+        else:
+            df_tot = df_tot.copy()
+            # asegurar tipos
+            df_tot['Fecha de Carga'] = pd.to_datetime(df_tot['Fecha de Carga'], errors='coerce')
+            df_tot['Monto'] = pd.to_numeric(df_tot['Monto'], errors='coerce')
+
+            # tomar las 7 fechas de carga más recientes (distintas)
+            fechas_recientes = (
+                df_tot['Fecha de Carga']
+                .dt.normalize()            # sólo la fecha (sin hora)
+                .dropna()
+                .drop_duplicates()
+                .sort_values(ascending=False)
+                .head(7)
+            )
+            # filtrar al conjunto de esas 7 fechas
+            df_tot = df_tot[df_tot['Fecha de Carga'].dt.normalize().isin(set(fechas_recientes))]
+            # ordenar por fecha para que la línea salga prolija
+            df_tot = df_tot.sort_values('Fecha de Carga')
+
+            fig, ax = plt.subplots(figsize=(8,4))
+
+            # 1) línea gris de fondo
+            ax.plot(df_tot['Fecha de Carga'], df_tot['Monto'],
+                    linestyle='-', color='lightgrey', linewidth=1)
+
+            # 2) marcadores individuales coloreados
+            for _, row in df_tot.iterrows():
+                pt_color = 'green' if row['Monto'] >= 0 else 'red'
+                ax.scatter(row['Fecha de Carga'], row['Monto'], color=pt_color, s=50, zorder=3)
+
+            ax.set_title("Conciliación por día")
+            ax.set_xlabel("Fecha de Carga")
+            ax.set_ylabel("Saldo")
+            ax.yaxis.set_major_formatter(mtick.StrMethodFormatter('${x:,.0f}'))
+
+            # 3) anotaciones desplazadas
+            for _, row in df_tot.iterrows():
+                ann_color = 'green' if row['Monto'] >= 0 else 'red'
+                label = f"{row['Fecha de Carga'].date()}\n${row['Monto']:,.0f}"
+                offset = 30 if row['Monto'] >= 0 else -30
+                ax.annotate(
+                    label,
+                    xy=(row['Fecha de Carga'], row['Monto']),
+                    xytext=(0, offset),
+                    textcoords="offset points",
+                    fontsize=8,
+                    ha='center',
+                    color=ann_color
+                )
+
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                st.pyplot(fig)
+
+    except Exception as e:
+        st.error(f"⚠️ Error sección Evolución del saldo: {e}")
+
+    # 9.2️⃣ Cantidad de compras (últimos 7 días) (#5)
+    st.header("5️⃣ Cantidad de compras (últimos 7 días)")
+    try:
+        df_eg2 = df[df['Tipo']=='Egreso'].copy()
+        if df_eg2.empty:
+            st.info("Aún no hay compras para el cálculo de los últimos 7 días.")
+        else:
+            df_eg2['Fecha'] = pd.to_datetime(df_eg2['Fecha'])
+            max_f = df_eg2['Fecha'].max()
+            min_f = max_f - pd.Timedelta(days=6)
+            conteo = df_eg2[(df_eg2['Fecha'] >= min_f) & (df_eg2['Fecha'] <= max_f)].groupby('Fecha').size()
+            if conteo.empty:
+                st.info("No hay compras en los últimos 7 días.")
+            else:
+                fig2, ax2 = plt.subplots(figsize=(8,4))
+                ax2.plot(conteo.index, conteo.values, marker='o', color='green')
+                ax2.set_title(f"Cantidad de compras: {min_f.date()} al {max_f.date()}")
+                ax2.set_xlabel("Fecha")
+                ax2.set_ylabel("Cantidad de compras")
+                ax2.set_ylim(0, conteo.max() + 5)
+                for fecha, val in conteo.items():
+                    ax2.text(fecha, val + 0.5, str(val), fontsize=8, ha='center', color='green')
+                with st.columns([1,2,1])[1]:
+                    st.pyplot(fig2)
+    except Exception as e:
+        st.error(f"⚠️ Error sección Cantidad de compras: {e}")
+
+    # 9.3️⃣ Valor total de compras (últimos 7 días) (#6)
+    st.header("6️⃣ Valor total de compras (últimos 7 días)")
+    try:
+        if df_eg2.empty:
+            st.info("Sin datos de egresos para valores totales.")
+        else:
+            suma = df_eg2[(df_eg2['Fecha'] >= min_f) & (df_eg2['Fecha'] <= max_f)].groupby('Fecha')['Monto'].sum()
+            if suma.empty or pd.isna(suma.max()):
+                st.info("No hay valor de compras en los últimos 7 días.")
+            else:
+                fig3, ax3 = plt.subplots(figsize=(8,4))
+                ax3.plot(suma.index, suma.values, marker='o', color='green')
+                ax3.set_title(f"Valor de compras: {min_f.date()} al {max_f.date()}")
+                ax3.set_xlabel("Fecha")
+                ax3.set_ylabel("Monto acumulado")
+                ax3.yaxis.set_major_formatter(mtick.StrMethodFormatter('${x:,.0f}'))
+                ax3.set_ylim(0, suma.max() * 1.25)
+                rango_s = suma.max() - suma.min() if suma.max() != suma.min() else suma.max()
+                for fecha, val in suma.items():
+                    desplaz = max(rango_s * 0.1, suma.max() * 0.05)
+                    ax3.text(fecha, val + desplaz, f"${val:,.0f}", fontsize=8, ha='center', color='green')
+                with st.columns([1,2,1])[1]:
+                    st.pyplot(fig3)
+    except Exception as e:
+        st.error(f"⚠️ Error sección Valor total de compras: {e}")
+
+    # 9.4️⃣ Ingresos últimos 7 días (#7)
+    st.header("7️⃣ Ingresos últimos 7 días")
+    try:
+        df_in2 = df[df['Tipo']=='Ingreso'].copy()
+        if df_in2.empty:
+            st.info("Aún no tenemos movimientos de ingresos.")
+        else:
+            df_in2['Fecha'] = pd.to_datetime(df_in2['Fecha'])
+            max_i = df_in2['Fecha'].max()
+            min_i = max_i - pd.Timedelta(days=6)
+            suma_i = df_in2[(df_in2['Fecha'] >= min_i) & (df_in2['Fecha'] <= max_i)].groupby('Fecha')['Monto'].sum()
+            if suma_i.empty or pd.isna(suma_i.max()):
+                st.info("Aún no tenemos ingresos en los últimos 7 días.")
+            else:
+                fig4, ax4 = plt.subplots(figsize=(8,4))
+                ax4.plot(suma_i.index, suma_i.values, marker='o', color='green')
+                ax4.set_title(f"Ingresos: {min_i.date()} al {max_i.date()}")
+                ax4.set_xlabel("Fecha")
+                ax4.set_ylabel("Monto acumulado")
+                ax4.yaxis.set_major_formatter(mtick.StrMethodFormatter('${x:,.0f}'))
+                ax4.set_ylim(0, suma_i.max() * 1.2)
+                rng_i = suma_i.max() - suma_i.min() if suma_i.max() != suma_i.min() else suma_i.max()
+                for fecha, val in suma_i.items():
+                    d = max(rng_i * 0.1, suma_i.max() * 0.05)
+                    ax4.text(fecha, val + d, f"${val:,.0f}", fontsize=8, ha='center', color='green')
+                with st.columns([1,2,1])[1]:
+                    st.pyplot(fig4)
+    except Exception as e:
+        st.error(f"⚠️ Error sección Ingresos últimos 7 días: {e}")
+
+
+
+# ⛔ FACTURACIÓN CONGELADA (10-nov-2026, pedido de Julián): las facturas ahora se hacen en el
+#    portal nuevo (Mayoristas 2.0). El módulo viejo NO debe emitir más en Siigo: si un lote se
+#    interrumpía, no guardaba los números y el siguiente intento re-facturaba todo (25 FV
+#    duplicadas anuladas con NC el 9-nov). Para descongelar: FACTURACION_CONGELADA = False.
+FACTURACION_CONGELADA = True
+PORTAL_FACTURACION_V2 = "https://mayoristas-v2.encargomio.workers.dev/entrar"
+
+if FACTURACION_CONGELADA and casillero_factura(casillero_actual):
+    st.subheader("🧾 Facturación")
+    st.warning(
+        "⚠️ **Las facturas se realizan en el nuevo portal:** "
+        f"[{PORTAL_FACTURACION_V2}]({PORTAL_FACTURACION_V2})"
+    )
+    st.link_button("Ir al nuevo portal de facturación", PORTAL_FACTURACION_V2, use_container_width=True)
+    _graficas_finales()
+    st.stop()
+
 st.subheader("📇 Facturación — Clientes")
 
 # ⛔ Bloqueo total si no aplica facturación (todo el módulo va DESPUÉS de este st.stop -> los
@@ -2373,6 +2545,8 @@ def create_customer_siigo(access_token: str, customer_data: dict):
     Retorna: (True, response_json) o (False, detalle_error_str)
     NO hace fallback a Medellín.
     """
+    if FACTURACION_CONGELADA:
+        return False, "Facturación congelada: usar el nuevo portal Mayoristas 2.0"
     url = f"{SIIGO_BASE_URL}/v1/customers"
 
     if not access_token:
@@ -2405,6 +2579,8 @@ def create_customer_siigo(access_token: str, customer_data: dict):
 
 
 def create_invoice_siigo(access_token: str, invoice_data: dict):
+    if FACTURACION_CONGELADA:
+        return False, "Facturación congelada: usar el nuevo portal Mayoristas 2.0"
     API_URL = "https://api.siigo.com/v1/invoices"
 
     headers = {
@@ -3423,153 +3599,4 @@ if st.button("🚀 Realizar facturación", use_container_width=True):
 
 #####################################################################################################################
 
-# ——————————————————————————————
-# 9) Todas las gráficas al final con numeración corregida
-# ——————————————————————————————
-
-# 9.1️⃣ Evolución del saldo reportado (#4)
-st.header("4️⃣ Evolución del saldo reportado")
-try:
-    df_tot = df[df['Tipo']=='Total']
-    if df_tot.empty:
-        st.info("Aún no hay movimientos totales para mostrar.")
-    else:
-        df_tot = df_tot.copy()
-        # asegurar tipos
-        df_tot['Fecha de Carga'] = pd.to_datetime(df_tot['Fecha de Carga'], errors='coerce')
-        df_tot['Monto'] = pd.to_numeric(df_tot['Monto'], errors='coerce')
-    
-        # tomar las 7 fechas de carga más recientes (distintas)
-        fechas_recientes = (
-            df_tot['Fecha de Carga']
-            .dt.normalize()            # sólo la fecha (sin hora)
-            .dropna()
-            .drop_duplicates()
-            .sort_values(ascending=False)
-            .head(7)
-        )
-        # filtrar al conjunto de esas 7 fechas
-        df_tot = df_tot[df_tot['Fecha de Carga'].dt.normalize().isin(set(fechas_recientes))]
-        # ordenar por fecha para que la línea salga prolija
-        df_tot = df_tot.sort_values('Fecha de Carga')
-    
-        fig, ax = plt.subplots(figsize=(8,4))
-    
-        # 1) línea gris de fondo
-        ax.plot(df_tot['Fecha de Carga'], df_tot['Monto'],
-                linestyle='-', color='lightgrey', linewidth=1)
-    
-        # 2) marcadores individuales coloreados
-        for _, row in df_tot.iterrows():
-            pt_color = 'green' if row['Monto'] >= 0 else 'red'
-            ax.scatter(row['Fecha de Carga'], row['Monto'], color=pt_color, s=50, zorder=3)
-    
-        ax.set_title("Conciliación por día")
-        ax.set_xlabel("Fecha de Carga")
-        ax.set_ylabel("Saldo")
-        ax.yaxis.set_major_formatter(mtick.StrMethodFormatter('${x:,.0f}'))
-    
-        # 3) anotaciones desplazadas
-        for _, row in df_tot.iterrows():
-            ann_color = 'green' if row['Monto'] >= 0 else 'red'
-            label = f"{row['Fecha de Carga'].date()}\n${row['Monto']:,.0f}"
-            offset = 30 if row['Monto'] >= 0 else -30
-            ax.annotate(
-                label,
-                xy=(row['Fecha de Carga'], row['Monto']),
-                xytext=(0, offset),
-                textcoords="offset points",
-                fontsize=8,
-                ha='center',
-                color=ann_color
-            )
-    
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
-            st.pyplot(fig)
-
-except Exception as e:
-    st.error(f"⚠️ Error sección Evolución del saldo: {e}")
-
-# 9.2️⃣ Cantidad de compras (últimos 7 días) (#5)
-st.header("5️⃣ Cantidad de compras (últimos 7 días)")
-try:
-    df_eg2 = df[df['Tipo']=='Egreso'].copy()
-    if df_eg2.empty:
-        st.info("Aún no hay compras para el cálculo de los últimos 7 días.")
-    else:
-        df_eg2['Fecha'] = pd.to_datetime(df_eg2['Fecha'])
-        max_f = df_eg2['Fecha'].max()
-        min_f = max_f - pd.Timedelta(days=6)
-        conteo = df_eg2[(df_eg2['Fecha'] >= min_f) & (df_eg2['Fecha'] <= max_f)].groupby('Fecha').size()
-        if conteo.empty:
-            st.info("No hay compras en los últimos 7 días.")
-        else:
-            fig2, ax2 = plt.subplots(figsize=(8,4))
-            ax2.plot(conteo.index, conteo.values, marker='o', color='green')
-            ax2.set_title(f"Cantidad de compras: {min_f.date()} al {max_f.date()}")
-            ax2.set_xlabel("Fecha")
-            ax2.set_ylabel("Cantidad de compras")
-            ax2.set_ylim(0, conteo.max() + 5)
-            for fecha, val in conteo.items():
-                ax2.text(fecha, val + 0.5, str(val), fontsize=8, ha='center', color='green')
-            with st.columns([1,2,1])[1]:
-                st.pyplot(fig2)
-except Exception as e:
-    st.error(f"⚠️ Error sección Cantidad de compras: {e}")
-
-# 9.3️⃣ Valor total de compras (últimos 7 días) (#6)
-st.header("6️⃣ Valor total de compras (últimos 7 días)")
-try:
-    if df_eg2.empty:
-        st.info("Sin datos de egresos para valores totales.")
-    else:
-        suma = df_eg2[(df_eg2['Fecha'] >= min_f) & (df_eg2['Fecha'] <= max_f)].groupby('Fecha')['Monto'].sum()
-        if suma.empty or pd.isna(suma.max()):
-            st.info("No hay valor de compras en los últimos 7 días.")
-        else:
-            fig3, ax3 = plt.subplots(figsize=(8,4))
-            ax3.plot(suma.index, suma.values, marker='o', color='green')
-            ax3.set_title(f"Valor de compras: {min_f.date()} al {max_f.date()}")
-            ax3.set_xlabel("Fecha")
-            ax3.set_ylabel("Monto acumulado")
-            ax3.yaxis.set_major_formatter(mtick.StrMethodFormatter('${x:,.0f}'))
-            ax3.set_ylim(0, suma.max() * 1.25)
-            rango_s = suma.max() - suma.min() if suma.max() != suma.min() else suma.max()
-            for fecha, val in suma.items():
-                desplaz = max(rango_s * 0.1, suma.max() * 0.05)
-                ax3.text(fecha, val + desplaz, f"${val:,.0f}", fontsize=8, ha='center', color='green')
-            with st.columns([1,2,1])[1]:
-                st.pyplot(fig3)
-except Exception as e:
-    st.error(f"⚠️ Error sección Valor total de compras: {e}")
-
-# 9.4️⃣ Ingresos últimos 7 días (#7)
-st.header("7️⃣ Ingresos últimos 7 días")
-try:
-    df_in2 = df[df['Tipo']=='Ingreso'].copy()
-    if df_in2.empty:
-        st.info("Aún no tenemos movimientos de ingresos.")
-    else:
-        df_in2['Fecha'] = pd.to_datetime(df_in2['Fecha'])
-        max_i = df_in2['Fecha'].max()
-        min_i = max_i - pd.Timedelta(days=6)
-        suma_i = df_in2[(df_in2['Fecha'] >= min_i) & (df_in2['Fecha'] <= max_i)].groupby('Fecha')['Monto'].sum()
-        if suma_i.empty or pd.isna(suma_i.max()):
-            st.info("Aún no tenemos ingresos en los últimos 7 días.")
-        else:
-            fig4, ax4 = plt.subplots(figsize=(8,4))
-            ax4.plot(suma_i.index, suma_i.values, marker='o', color='green')
-            ax4.set_title(f"Ingresos: {min_i.date()} al {max_i.date()}")
-            ax4.set_xlabel("Fecha")
-            ax4.set_ylabel("Monto acumulado")
-            ax4.yaxis.set_major_formatter(mtick.StrMethodFormatter('${x:,.0f}'))
-            ax4.set_ylim(0, suma_i.max() * 1.2)
-            rng_i = suma_i.max() - suma_i.min() if suma_i.max() != suma_i.min() else suma_i.max()
-            for fecha, val in suma_i.items():
-                d = max(rng_i * 0.1, suma_i.max() * 0.05)
-                ax4.text(fecha, val + d, f"${val:,.0f}", fontsize=8, ha='center', color='green')
-            with st.columns([1,2,1])[1]:
-                st.pyplot(fig4)
-except Exception as e:
-    st.error(f"⚠️ Error sección Ingresos últimos 7 días: {e}")
+_graficas_finales()
